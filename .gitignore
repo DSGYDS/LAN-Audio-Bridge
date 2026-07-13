@@ -1,0 +1,42 @@
+# === Build outputs ===
+bin/
+obj/
+build/
+app/build/
+*.apk
+*.aab
+*.appx
+*.msix
+
+# === IDE & OS ===
+.idea/
+.gradle/
+.kotlin/
+*.suo
+*.user
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# === .NET ===
+*.nupkg
+project.assets.json
+project.nuget.cache
+
+# === Kotlin ===
+local.properties
+
+# === Python ===
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# === Archives (VB-Cable drivers, etc.) ===
+archive/*.zip
+archive/*.7z
+
+# === Runtime artifacts ===
+*.log

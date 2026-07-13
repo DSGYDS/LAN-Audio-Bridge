@@ -1,0 +1,62 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="LanAudioBridge.Desktop.MainWindow"
+        Title="LAN Audio Bridge — 电脑接收端"
+        Width="640" Height="520"
+        WindowStartupLocation="CenterScreen">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="18">
+    <!-- Header -->
+    <TextBlock Grid.Row="0" Text="LAN Audio Bridge 电脑接收端" FontSize="22" FontWeight="Bold"
+               Foreground="{DynamicResource SystemAccentColor}" Margin="0,0,0,8" />
+
+    <!-- Main content -->
+    <StackPanel Grid.Row="1" Spacing="10" VerticalAlignment="Top">
+      <!-- Status -->
+      <Border Background="{DynamicResource SystemControlPageBackgroundChromeLowBrush}" CornerRadius="6" Padding="10">
+        <StackPanel>
+          <TextBlock Name="ConnectionStateText" Text="⚪ 未连接" FontSize="16" FontWeight="Bold" />
+          <TextBlock Name="StatusText" Text="正在初始化..." FontSize="14" TextWrapping="Wrap" Margin="0,4,0,0" />
+        </StackPanel>
+      </Border>
+
+      <!-- Local IP -->
+      <TextBlock Name="IpLabel" Text="本机 IP：--.---.---.---" FontSize="13" FontWeight="SemiBold" />
+      <TextBlock Text="手机端请连接同一 Wi-Fi，并选择扫描到的电脑，或手动填写上面的 IP。"
+                 FontSize="12" Foreground="Gray" TextWrapping="Wrap" />
+
+      <!-- Volume -->
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <Label Grid.Column="0" Content="电脑播放音量：" FontWeight="SemiBold" VerticalAlignment="Center" />
+        <Slider Name="VolumeSlider" Grid.Column="1" Minimum="0" Maximum="1" Value="0.75" />
+        <TextBlock Name="VolumeText" Grid.Column="2" Text="75%" VerticalAlignment="Center" Margin="8,0,0,0" />
+      </Grid>
+
+      <!-- 当前路由信息 -->
+      <TextBlock Name="JitterLabel" Text="音频端口：12345    握手/切换端口：12347" FontSize="12" Foreground="Gray" />
+
+      <Border BorderBrush="{DynamicResource SystemAccentColor}" BorderThickness="1" CornerRadius="6" Padding="10">
+        <StackPanel Spacing="4">
+          <TextBlock Text="测试路线" FontWeight="SemiBold" FontSize="13" />
+          <TextBlock Text="1. 手机系统音频 → 电脑扬声器" FontSize="12" />
+          <TextBlock Text="2. 手机系统音频 + 手机麦克风 → 电脑扬声器" FontSize="12" />
+          <TextBlock Text="3. 手机麦克风 → 电脑虚拟麦克风" FontSize="12" />
+          <TextBlock Text="4. 手机系统音频 → 电脑虚拟麦克风" FontSize="12" />
+        </StackPanel>
+      </Border>
+
+      <!-- 使用说明 -->
+      <Border Background="{DynamicResource SystemControlPageBackgroundChromeLowBrush}" CornerRadius="6" Padding="10" Margin="0,8,0,0">
+        <StackPanel Spacing="4">
+          <TextBlock Text="测试提示" FontWeight="SemiBold" FontSize="13" />
+          <TextBlock Text="扬声器路线使用系统默认播放设备。" FontSize="12" Foreground="Gray" TextWrapping="Wrap" />
+          <TextBlock Text="虚拟麦克风路线需要安装 VB-Audio Virtual Cable，并在微信、OBS、游戏等目标软件中选择 CABLE Output 作为麦克风。" FontSize="12" Foreground="Gray" TextWrapping="Wrap" />
+          <TextBlock Text="关闭本窗口会停止接收和路由。" FontSize="12" Foreground="Gray" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+
+    <!-- 底部 -->
+    <TextBlock Grid.Row="2" Name="FooterText" Text="正在监听：音频 12345，握手/热切 12347"
+               FontSize="11" Foreground="Gray" Margin="0,8,0,4" />
+  </Grid>
+</Window>
