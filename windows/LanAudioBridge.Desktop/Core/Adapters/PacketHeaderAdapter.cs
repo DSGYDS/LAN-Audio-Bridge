@@ -29,8 +29,7 @@ public sealed class PacketHeaderAdapter : IPacketProtocol
         if (data.Length < PacketHeader.HeaderSize)
             return null;
 
-        var buf = data.ToArray();
-        var info = PacketHeader.TryDecode(buf);
+        var info = PacketHeader.TryDecode(data);
         if (info == null)
             return null;
 

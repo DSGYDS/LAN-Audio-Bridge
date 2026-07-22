@@ -28,16 +28,16 @@ public sealed class UdpTransport : ITransport, IDisposable
         _remotePort = remotePort ?? localPort;
     }
 
-    public async Task ConnectAsync(CancellationToken ct = default)
+    public Task ConnectAsync(CancellationToken ct = default)
     {
-        if (_cts != null) return;
+        if (_cts != null) return Task.CompletedTask;
 
         if (_remoteHost != null)
             _client.Connect(_remoteHost, _remotePort);
 
         _cts = new CancellationTokenSource();
         _receiveLoop = ReceiveLoopAsync(_cts.Token);
-        await Task.CompletedTask;
+        return Task.CompletedTask;
     }
 
     public Task DisconnectAsync()
@@ -54,15 +54,15 @@ public sealed class UdpTransport : ITransport, IDisposable
         {
             if (_remoteHost != null)
             {
-                // client 模式：Connect 后直接 Send
-                await _client.SendAsync(data.ToArray(), data.Length);
+                // client 模式：Connect 后直接 Send（零拷贝，无需 ToArray）
+                await _client.SendAsync(data, ct);
             }
             else
             {
                 // server 模式：回复给最后发包的远端
                 var ep = _lastRemoteEp;
                 if (ep != null)
-                    await _client.SendAsync(data.ToArray(), data.Length, ep);
+                    await _client.SendAsync(data, ep, ct);
                 else
                     Log.W("UdpTransport", "SendAsync called in server mode but no remote endpoint known yet");
             }
@@ -71,14 +71,6 @@ public sealed class UdpTransport : ITransport, IDisposable
         {
             Log.E("UdpTransport", $"SendAsync error: {ex.Message}");
         }
-    }
-
-    /// <summary>
-    /// 向指定端点发送数据（server 模式下使用）
-    /// </summary>
-    public async Task SendToAsync(byte[] data, IPEndPoint remoteEp, CancellationToken ct = default)
-    {
-        await _client.SendAsync(data, data.Length, remoteEp);
     }
 
     private async Task ReceiveLoopAsync(CancellationToken ct)

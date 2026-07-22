@@ -13,7 +13,9 @@ public class NullTransport : ITransport
     public Task ConnectAsync(CancellationToken ct = default) => Task.CompletedTask;
     public Task DisconnectAsync() => Task.CompletedTask;
     public Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default) => Task.CompletedTask;
+#pragma warning disable CS0067 // 桩实现无需触发事件
     public event Action<ReadOnlyMemory<byte>>? PacketReceived;
+#pragma warning restore CS0067
     public bool IsConnected => false;
     public TransportType Type => TransportType.Udp;
 }

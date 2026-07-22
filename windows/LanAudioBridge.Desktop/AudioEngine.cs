@@ -1,6 +1,4 @@
 using System;
-using System.Buffers;
-using System.Net;
 using System.Threading;
 using Concentus.Structs;
 using NAudio.Wave;
@@ -20,8 +18,6 @@ public sealed class AudioEngine : IDisposable
     public const int SampleRate = 48000;
     public const int Channels = 1;
     public int FrameSize => _config.FrameSize;
-    public int FrameBytes => _config.FrameBytes;
-    public int Port => _config.AudioPort;
 
     /// <summary>构造 AudioEngine，接收 AudioConfig 参数和 ITransport 实例</summary>
     public AudioEngine(ITransport? transport = null, AudioConfig? config = null)
@@ -72,9 +68,6 @@ public sealed class AudioEngine : IDisposable
 
     /// <summary>音频超时触发（连续 [AudioTimeoutMs]ms 未收到音频），用于进入 RECOVERING</summary>
     public event Action? OnAudioTimeout;
-
-    // ── 字节数组池（减少 GC 压力） ──
-    private static readonly ArrayPool<byte> BytePool = ArrayPool<byte>.Shared;
 
     // ── 生命周期 ──
 
@@ -129,16 +122,11 @@ public sealed class AudioEngine : IDisposable
 
     // ── 属性 ──
 
-    /// <summary>音频路由器（可切换模式、查询状态）</summary>
-    /// <summary>播放音量，0.0 ~ 2.0</summary>
     public float Volume
     {
         get => _volume;
         set => _volume = Math.Clamp(value, 0, 2);
     }
-
-    public bool IsRunning => _running;
-    public long FrameCount => _frameCount;
 
     public void Dispose()
     {
@@ -199,53 +187,43 @@ public sealed class AudioEngine : IDisposable
 
             var opusData = packet.Value.Payload;
             ushort seq = packet.Value.Sequence;
-            int opusLen = opusData.Length;
-            byte[] opus = BytePool.Rent(opusLen);
-            try
+
+            // ── FEC 丢包补偿：检测 seq 跳号，用当前包的冗余数据恢复丢失帧 ──
+            if (_hasLastSeq)
             {
-                Buffer.BlockCopy(opusData, 0, opus, 0, opusLen);
-
-                // ── FEC 丢包补偿：检测 seq 跳号，用当前包的冗余数据恢复丢失帧 ──
-                if (_hasLastSeq)
+                int gap = (ushort)(seq - _lastSeq);
+                if (gap == 2) // 恰好丢了 1 帧 → 用 FEC 恢复
                 {
-                    int gap = (ushort)(seq - _lastSeq);
-                    if (gap == 2) // 恰好丢了 1 帧 → 用 FEC 恢复
+                    var fecPcm = DecodeFec(opusData);
+                    if (fecPcm != null)
                     {
-                        var fecPcm = DecodeFec(opus.AsSpan(0, opusLen));
-                        if (fecPcm != null)
-                        {
-                            _fecRecovered++;
-                            _jitterBuffer.Push((ushort)(seq - 1), fecPcm);
-                        }
+                        _fecRecovered++;
+                        _jitterBuffer.Push((ushort)(seq - 1), fecPcm);
                     }
-                    else if (gap > 2 && gap < 1000) // 丢了多帧（排除新会话误判）
-                    {
-                        _lostFrames += gap - 1;
-                    }
-                    // gap >= 1000 视为新会话（Android 重新推流 seq 重置），不统计丢包
                 }
-                _lastSeq = seq;
-                _hasLastSeq = true;
-
-                var pcm = DecodeAndProcess(opus.AsSpan(0, opusLen));
-                if (pcm != null)
+                else if (gap > 2 && gap < 1000) // 丢了多帧（排除新会话误判）
                 {
-                    // 更新最后音频时间（看门狗恢复计时）
-                    _lastAudioTime = DateTime.UtcNow;
-                    _watchdogFired = false;
-
-                    // 推入 Jitter Buffer（由播放定时器匀速拉取）
-                    _jitterBuffer.Push(seq, pcm);
-                    if (Interlocked.Read(ref _frameCount) == 0)
-                    {
-                        OnFirstFrameDecoded?.Invoke();
-                    }
-                    Interlocked.Increment(ref _frameCount);
+                    _lostFrames += gap - 1;
                 }
+                // gap >= 1000 视为新会话（Android 重新推流 seq 重置），不统计丢包
             }
-            finally
+            _lastSeq = seq;
+            _hasLastSeq = true;
+
+            var pcm = DecodeAndProcess(opusData);
+            if (pcm != null)
             {
-                BytePool.Return(opus);
+                // 更新最后音频时间（看门狗恢复计时）
+                _lastAudioTime = DateTime.UtcNow;
+                _watchdogFired = false;
+
+                // 推入 Jitter Buffer（由播放定时器匀速拉取）
+                _jitterBuffer.Push(seq, pcm);
+                if (Interlocked.Read(ref _frameCount) == 0)
+                {
+                    OnFirstFrameDecoded?.Invoke();
+                }
+                Interlocked.Increment(ref _frameCount);
             }
         }
         catch (Exception ex)
@@ -255,65 +233,54 @@ public sealed class AudioEngine : IDisposable
     }
 
     // ── Opus 解码 + 音量缩放 ──
-    // 注：7kHz LPF 已移除（改用 Android 端 200Hz HPF 解决底噪），详见 2026-07-09 决策
-    private float[]? DecodeAndProcess(ReadOnlySpan<byte> opus)
+    private float[]? DecodeAndProcess(byte[] opus)
     {
-        var pcmShort = DecodeShort(opus);
+        var pcmShort = DecodeShort(opus, false);
         if (pcmShort == null) return null;
-
-        // short[] → float32（NAudio 使用 float32 波形）
-        var pcmFloat = new float[pcmShort.Length];
-        for (int i = 0; i < pcmShort.Length; i++)
-            pcmFloat[i] = pcmShort[i] / 32768f;
-
-        // 音量缩放
-        if (_volume < 0.999f)
-        {
-            for (int i = 0; i < pcmFloat.Length; i++)
-                pcmFloat[i] *= _volume;
-        }
-
-        return pcmFloat;
-    }
-
-    private short[]? DecodeShort(ReadOnlySpan<byte> opus)
-    {
-        try
-        {
-            var pcm = new short[FrameSize];
-#pragma warning disable CS0618
-            int n = _decoder.Decode(opus.ToArray(), 0, opus.Length, pcm, 0, FrameSize, false);
-#pragma warning restore CS0618
-            return n > 0 ? pcm : null;
-        }
-        catch (Exception ex)
-        {
-            Log.E("AudioEngine", $"Decode error (opus len={opus.Length}): {ex.Message}");
-            return null;
-        }
+        return ShortToFloat(pcmShort);
     }
 
     /// <summary>用当前包的 FEC 冗余数据恢复丢失的前一帧</summary>
-    private float[]? DecodeFec(ReadOnlySpan<byte> currentOpus)
+    private float[]? DecodeFec(byte[] currentOpus)
     {
         try
         {
-            var pcm = new short[FrameSize];
-#pragma warning disable CS0618
-            // decodeFEC=true：告诉解码器用当前包内嵌的冗余数据恢复丢失帧
-            int n = _decoder.Decode(currentOpus.ToArray(), 0, currentOpus.Length, pcm, 0, FrameSize, true);
-#pragma warning restore CS0618
-            if (n <= 0) return null;
-
-            var pcmFloat = new float[n];
-            for (int i = 0; i < n; i++)
-                pcmFloat[i] = pcm[i] / 32768f * _volume;
-            return pcmFloat;
+            var pcmShort = DecodeShort(currentOpus, true);
+            if (pcmShort == null) return null;
+            return ShortToFloat(pcmShort);
         }
         catch
         {
             return null; // FEC 恢复失败不影响正常流程
         }
+    }
+
+    /// <summary>Opus 解码（decodeFEC=true 时用包内冗余数据恢复丢帧）</summary>
+    private short[]? DecodeShort(byte[] opus, bool fec)
+    {
+        try
+        {
+            var pcm = new short[FrameSize];
+#pragma warning disable CS0618
+            int n = _decoder.Decode(opus, 0, opus.Length, pcm, 0, FrameSize, fec);
+#pragma warning restore CS0618
+            return n > 0 ? pcm : null;
+        }
+        catch (Exception ex)
+        {
+            Log.E("AudioEngine", $"Decode error (opus len={opus.Length}, fec={fec}): {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>short[] → float32 + 音量缩放（复用逻辑）</summary>
+    private float[] ShortToFloat(short[] pcmShort)
+    {
+        var pcmFloat = new float[pcmShort.Length];
+        float vol = _volume;
+        for (int i = 0; i < pcmShort.Length; i++)
+            pcmFloat[i] = pcmShort[i] / 32768f * vol;
+        return pcmFloat;
     }
 
     // ── Jitter Buffer 播放定时器回调（每 20ms） ──

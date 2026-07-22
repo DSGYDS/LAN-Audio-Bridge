@@ -1,5 +1,4 @@
 using System;
-using System.Net;
 
 namespace LanAudioBridge.Desktop;
 
@@ -63,7 +62,7 @@ public static class PacketHeader
     ///
     /// 校验失败时调用方应丢弃整个包，不做截断或容错。
     /// </summary>
-    public static PacketHeaderInfo? TryDecode(byte[] data)
+    public static PacketHeaderInfo? TryDecode(ReadOnlySpan<byte> data)
     {
         if (data.Length < HeaderSize) return null;
 
@@ -96,7 +95,7 @@ public static class PacketHeader
         buf[offset + 3] = (byte)value;
     }
 
-    private static int ReadBigEndian32(byte[] buf, int offset)
+    private static int ReadBigEndian32(ReadOnlySpan<byte> buf, int offset)
     {
         return (buf[offset] << 24)
              | (buf[offset + 1] << 16)

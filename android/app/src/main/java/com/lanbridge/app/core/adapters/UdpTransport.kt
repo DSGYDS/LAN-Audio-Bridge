@@ -68,11 +68,6 @@ class UdpTransport(
         }
     }
 
-    /** 向指定地址发送（server 模式使用） */
-    suspend fun sendTo(data: ByteArray, addr: InetSocketAddress) {
-        socket.send(DatagramPacket(data, data.size, addr))
-    }
-
     private suspend fun receiveLoop() = withContext(Dispatchers.IO) {
         while (isActive && _isConnected) {
             try {

@@ -1,5 +1,4 @@
 using System;
-using System.Net;
 using System.Threading;
 using LanAudioBridge.Core;
 using LanAudioBridge.Core.Infrastructure;
@@ -13,8 +12,6 @@ namespace LanAudioBridge.Desktop;
 /// </summary>
 public sealed class HandshakeServer : IDisposable
 {
-    private const int Port = 12347;
-
     private readonly ITransport? _transport;
     private readonly IPacketProtocol _protocol = new LanAudioBridge.Core.Adapters.PacketHeaderAdapter();
     private volatile bool _running;
@@ -38,9 +35,6 @@ public sealed class HandshakeServer : IDisposable
         _onModeChange = onModeChange;
     }
 
-    /// <summary>运行中也可设置路由回调</summary>
-    public void SetModeCallback(Func<int, bool> cb) => _onModeChange = cb;
-
     // ── 生命周期 ──
 
     public void Start()
@@ -49,7 +43,7 @@ public sealed class HandshakeServer : IDisposable
 
         if (_transport == null)
         {
-            var msg = $"握手服务未提供 ITransport，无法启动";
+            var msg = "握手服务未提供 ITransport，无法启动";
             Log.E("HandshakeServer", msg);
             OnError?.Invoke(msg);
             return;
