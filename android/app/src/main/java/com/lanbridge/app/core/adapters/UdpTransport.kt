@@ -12,13 +12,16 @@ import java.net.InetSocketAddress
  * UdpTransport — ITransport 的 UDP 实现
  *
  * 包裹 DatagramSocket，支持 server 模式（仅绑定端口）和 client 模式（指定远程主机）。
+ * client 模式绑定随机端口（port=0），server 模式绑定指定端口。
  */
 class UdpTransport(
     private val localPort: Int,
     private val remoteHost: String? = null,
     private val remotePort: Int? = null
 ) : ITransport {
-    private val socket = DatagramSocket(localPort)
+    // client 模式绑定随机端口，server 模式绑定指定端口
+    private val socket: DatagramSocket = if (remoteHost != null) DatagramSocket()
+                                         else DatagramSocket(localPort)
     private var _isConnected = false
     private var scope: CoroutineScope? = null
     private val recvBuf = ByteArray(65507) // 最大 UDP 包
@@ -27,7 +30,7 @@ class UdpTransport(
         if (_isConnected) return
 
         if (remoteHost != null) {
-            socket.connect(InetSocketAddress(remoteHost, remotePort ?: localPort))
+            socket.connect(InetSocketAddress(remoteHost, remotePort ?: 12345))
         }
         _isConnected = true
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -50,6 +53,18 @@ class UdpTransport(
             }
         } catch (e: Exception) {
             Log.e("UdpTransport", "send error: ${e.message}")
+        }
+    }
+
+    /**
+     * 阻塞发送（供非协程的音频采集线程使用，不走 suspend）
+     * 仅在 client 模式（已 connect）下有效
+     */
+    fun sendBlocking(data: ByteArray) {
+        try {
+            socket.send(DatagramPacket(data, data.size))
+        } catch (e: Exception) {
+            Log.e("UdpTransport", "sendBlocking error: ${e.message}")
         }
     }
 

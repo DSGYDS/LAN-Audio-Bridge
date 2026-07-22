@@ -2,8 +2,12 @@ package com.lanbridge.app.audio
 
 import android.content.Context
 import android.media.projection.MediaProjection
+import com.lanbridge.app.core.adapters.UdpTransport
+import com.lanbridge.app.core.factory.PlatformFactory
 import com.lanbridge.app.core.infrastructure.Log
-import com.lanbridge.app.net.UdpSender
+import com.lanbridge.app.core.interfaces.Packet
+import com.lanbridge.app.net.PacketType
+import kotlinx.coroutines.runBlocking
 
 /**
  * 音频管线 — 采集 → Opus 编码 → UDP 发送
@@ -36,7 +40,8 @@ class AudioPipeline {
     private val mic: MicrophoneCapturer
     private val sys: SystemAudioCapturer
     private val enc: AudioEncoder
-    private val udp = UdpSender()               // UDP 发送器
+    private var transport: UdpTransport? = null    // ITransport 实现（UDP 发送）
+    private val protocol = PlatformFactory.createProtocol()  // 协议编解码
 
     /** 构造 AudioPipeline，接收 AudioConfig 参数 */
     constructor(config: AudioConfig = AudioConfig.DEFAULT) {
@@ -59,19 +64,26 @@ class AudioPipeline {
     fun setOnOpusData(cb: (ByteArray, Int) -> Unit) { this.cb = cb }
 
     // ── 启动推流 ──
-    fun startStreaming(m: Int = MODE_MIC, proj: MediaProjection? = null, ctx: Context? = null, host: String? = null, port: Int = UdpSender.DEFAULT_PORT): Boolean {
+    fun startStreaming(m: Int = MODE_MIC, proj: MediaProjection? = null, ctx: Context? = null, host: String? = null, port: Int = 12345): Boolean {
         if (streaming) return true
         if (!enc.prepare()) return false
-        if (host != null && !udp.prepare(host, port)) {
-            enc.release()
-            return false
+        if (host != null) {
+            try {
+                val t = UdpTransport(localPort = 0, remoteHost = host, remotePort = port)
+                runBlocking { t.connect() }
+                transport = t
+            } catch (e: Exception) {
+                Log.e(TAG, "Transport connect failed: ${e.message}")
+                enc.release()
+                return false
+            }
         }
         mode = m; stopping = false; streaming = true
         frameAssembler.reset()
         val started = startCapture(m, proj, ctx)
         if (!started) {
             streaming = false
-            udp.release()
+            releaseTransport()
             enc.release()
         }
         return started
@@ -141,7 +153,7 @@ class AudioPipeline {
                         frameAssembler.push(pcmPart) { pcm ->
                             val opus = enc.encodeFrame(pcm)
                             if (opus != null) {
-                                udp.sendOpusFrame(opus, seq)
+                                sendOpusFrame(opus, seq)
                                 if (!firstFrameNotified) {
                                     firstFrameNotified = true
                                     onFirstFrame?.invoke()
@@ -174,7 +186,7 @@ class AudioPipeline {
                 frameAssembler.push(pcm) { frame ->
                     val opus = enc.encodeFrame(frame)
                     if (opus != null) {
-                        udp.sendOpusFrame(opus, seq)
+                        sendOpusFrame(opus, seq)
                         if (!firstFrameNotified) {
                             firstFrameNotified = true
                             onFirstFrame?.invoke()
@@ -188,6 +200,14 @@ class AudioPipeline {
                 if (failCount > 10) { Thread.sleep(2); failCount = 0 }
             }
         }
+    }
+
+    /** 通过 ITransport 发送一个 Opus 帧（协议编码 + UDP 发送） */
+    private fun sendOpusFrame(opus: ByteArray, seq: Int) {
+        val t = transport ?: return
+        val packet = Packet(PacketType.AUDIO, seq.toUShort(), opus)
+        val encoded = protocol.encode(packet)
+        t.sendBlocking(encoded)
     }
 
     /** 停止当前采集线程（供 switchMode 使用，不释放全部资源） */
@@ -214,11 +234,19 @@ class AudioPipeline {
         streaming = false
         thread?.join(500)
         thread = null
-        udp.release()
+        releaseTransport()
         mic.stop(); mic.release()
         sys.stop(); sys.release()
         enc.release()
         Log.i(TAG, "stopped")
+    }
+
+    /** 释放 Transport 资源 */
+    private fun releaseTransport() {
+        transport?.let { t ->
+            runBlocking { t.disconnect() }
+        }
+        transport = null
     }
 
 

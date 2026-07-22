@@ -19,6 +19,7 @@ public sealed class UdpTransport : ITransport, IDisposable
     private readonly int _remotePort;
     private CancellationTokenSource? _cts;
     private Task? _receiveLoop;
+    private IPEndPoint? _lastRemoteEp;  // server 模式：记录最后收到包的远端地址
 
     public UdpTransport(int localPort, string? remoteHost = null, int? remotePort = null)
     {
@@ -58,9 +59,12 @@ public sealed class UdpTransport : ITransport, IDisposable
             }
             else
             {
-                // server 模式需要知道目标地址，通过 PacketReceived 事件中记录
-                // 这里暂不支持无 Connect 的发送，业务层需自行处理
-                Log.W("UdpTransport", "SendAsync called in server mode without remote address");
+                // server 模式：回复给最后发包的远端
+                var ep = _lastRemoteEp;
+                if (ep != null)
+                    await _client.SendAsync(data.ToArray(), data.Length, ep);
+                else
+                    Log.W("UdpTransport", "SendAsync called in server mode but no remote endpoint known yet");
             }
         }
         catch (Exception ex)
@@ -84,6 +88,7 @@ public sealed class UdpTransport : ITransport, IDisposable
             try
             {
                 var result = await _client.ReceiveAsync(ct);
+                _lastRemoteEp = result.RemoteEndPoint;  // 记录发送方地址（server 模式回复用）
                 PacketReceived?.Invoke(result.Buffer);
             }
             catch (OperationCanceledException) { break; }

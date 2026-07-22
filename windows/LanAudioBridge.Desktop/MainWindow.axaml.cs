@@ -1,9 +1,9 @@
 using System;
 using System.Linq;
-using System.Net;
-using System.Net.Sockets;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using LanAudioBridge.Core;
+using LanAudioBridge.Core.Factory;
 using LanAudioBridge.Core.Infrastructure;
 
 namespace LanAudioBridge.Desktop;
@@ -27,8 +27,13 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        _engine = new AudioEngine();
-        _hs = new HandshakeServer(OnHandshakeRoute);
+
+        // 通过 PlatformFactory 创建传输层实例
+        var audioTransport = PlatformFactory.CreateTransport(TransportType.Udp, null, 12345);
+        var hsTransport = PlatformFactory.CreateTransport(TransportType.Udp, null, 12347);
+
+        _engine = new AudioEngine(audioTransport);
+        _hs = new HandshakeServer(hsTransport, OnHandshakeRoute);
         Loaded += OnLoaded;
 
         // ── 关闭时最小化到托盘，不退出 ──

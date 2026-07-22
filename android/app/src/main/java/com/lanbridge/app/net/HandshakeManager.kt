@@ -1,8 +1,12 @@
 package com.lanbridge.app.net
 
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
+import com.lanbridge.app.core.adapters.PacketHeaderAdapter
+import com.lanbridge.app.core.adapters.UdpTransport
+import com.lanbridge.app.core.infrastructure.Log
+import com.lanbridge.app.core.interfaces.Packet
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * HandshakeManager — 握手与热切管理器
@@ -18,14 +22,16 @@ import java.net.InetAddress
  * - 3 = 系统音频→虚拟麦克风
  *
  * ## 约束
- * - 每次握手/热切独立创建和释放 socket，不保留状态
+ * - 每次握手/热切独立创建和释放 UdpTransport，不保留状态
  * - 超时 500ms，超时返回 false
  * - 所有异常统一捕获返回 false，不在这个类里做重试（重试由 ReconnectionManager 负责）
  */
 object HandshakeManager {
 
+    private const val TAG = "HandshakeManager"
     private const val HANDSHAKE_PORT = 12347
-    private const val TIMEOUT_MS = 500
+    private const val TIMEOUT_MS = 500L
+    private val protocol = PacketHeaderAdapter()
 
     /**
      * 握手 — 发 HELLO 到电脑，等 HELLO_ACK
@@ -35,26 +41,30 @@ object HandshakeManager {
      * @return true 表示握手成功（收到 HELLO_ACK）
      */
     fun handshake(host: String, route: Int): Boolean {
-        var sock: DatagramSocket? = null
+        var transport: UdpTransport? = null
         return try {
-            sock = DatagramSocket()
-            sock.soTimeout = TIMEOUT_MS
-            val addr = InetAddress.getByName(host)
+            transport = UdpTransport(localPort = 0, remoteHost = host, remotePort = HANDSHAKE_PORT)
+            val reply = CompletableDeferred<ByteArray?>()
+            transport.onPacketReceived = { data -> reply.complete(data) }
+            runBlocking { transport.connect() }
 
-            // 编码 HELLO 包: PacketHeader(HELLO, seq=0, payloadLen=1) + 1B routeMode
-            val header = PacketHeader.encodeHeader(PacketType.HELLO.code, seq = 0, payloadLen = 1)
-            val payload = byteArrayOf(route.toByte())
-            val pktData = header + payload
-            sock.send(DatagramPacket(pktData, pktData.size, addr, HANDSHAKE_PORT))
+            // 编码并发送 HELLO 包
+            val helloPacket = Packet(PacketType.HELLO, 0u, byteArrayOf(route.toByte()))
+            transport.sendBlocking(protocol.encode(helloPacket))
 
-            // 收 HELLO_ACK
-            val buf = ByteArray(PacketHeader.HEADER_SIZE + 4) // 多留 4B 余量
-            val pkt = DatagramPacket(buf, buf.size)
-            sock.receive(pkt)
-            val reply = buf.copyOf(pkt.length)
-            val info = PacketHeader.tryDecode(reply)
-            info != null && info.type == PacketType.HELLO_ACK.code
-        } catch (_: Exception) { false } finally { sock?.close() }
+            // 等待 HELLO_ACK（500ms 超时）
+            val response = runBlocking { withTimeoutOrNull(TIMEOUT_MS) { reply.await() } }
+            if (response == null) return false
+
+            // 解析回复
+            val decoded = protocol.decode(response)
+            decoded != null && decoded.type == PacketType.HELLO_ACK
+        } catch (e: Exception) {
+            Log.e(TAG, "handshake error: ${e.message}")
+            false
+        } finally {
+            transport?.let { runBlocking { it.disconnect() } }
+        }
     }
 
     /**
@@ -64,16 +74,18 @@ object HandshakeManager {
      * @param route 路线编号 0~3
      */
     fun sendRouteUpdate(host: String, route: Int) {
-        var sock: DatagramSocket? = null
+        var transport: UdpTransport? = null
         try {
-            sock = DatagramSocket()
-            val addr = InetAddress.getByName(host)
+            transport = UdpTransport(localPort = 0, remoteHost = host, remotePort = HANDSHAKE_PORT)
+            runBlocking { transport.connect() }
 
-            // 编码 ROUTE 包: PacketHeader(ROUTE, seq=0, payloadLen=1) + 1B newRouteMode
-            val header = PacketHeader.encodeHeader(PacketType.ROUTE.code, seq = 0, payloadLen = 1)
-            val payload = byteArrayOf(route.toByte())
-            val pktData = header + payload
-            sock.send(DatagramPacket(pktData, pktData.size, addr, HANDSHAKE_PORT))
-        } catch (_: Exception) {} finally { sock?.close() }
+            // 编码并发送 ROUTE 包
+            val routePacket = Packet(PacketType.ROUTE, 0u, byteArrayOf(route.toByte()))
+            transport.sendBlocking(protocol.encode(routePacket))
+        } catch (e: Exception) {
+            Log.e(TAG, "sendRouteUpdate error: ${e.message}")
+        } finally {
+            transport?.let { runBlocking { it.disconnect() } }
+        }
     }
 }

@@ -1,10 +1,10 @@
 using System;
 using System.Buffers;
 using System.Net;
-using System.Net.Sockets;
 using System.Threading;
 using Concentus.Structs;
 using NAudio.Wave;
+using LanAudioBridge.Core;
 using LanAudioBridge.Core.Infrastructure;
 
 namespace LanAudioBridge.Desktop;
@@ -23,11 +23,12 @@ public sealed class AudioEngine : IDisposable
     public int FrameBytes => _config.FrameBytes;
     public int Port => _config.AudioPort;
 
-    /// <summary>构造 AudioEngine，接收 AudioConfig 参数</summary>
-    public AudioEngine(AudioConfig? config = null)
+    /// <summary>构造 AudioEngine，接收 AudioConfig 参数和 ITransport 实例</summary>
+    public AudioEngine(ITransport? transport = null, AudioConfig? config = null)
     {
         _config = config ?? AudioConfig.Default;
         _router = new AudioRouter(_config);
+        _transport = transport;
     }
 
     // ── 解码器 ──
@@ -39,14 +40,26 @@ public sealed class AudioEngine : IDisposable
     private readonly AudioRouter _router;
     public AudioRouter Router => _router;
 
-    // ── 网络 ──
-    private UdpClient? _sock;
-    private Thread? _recvThread;
+    // ── 网络（通过 ITransport 接口） ──
+    private readonly ITransport? _transport;
+
+    // ── 协议编解码（通过 IPacketProtocol 接口） ──
+    private readonly IPacketProtocol _protocol = new LanAudioBridge.Core.Adapters.PacketHeaderAdapter();
 
     // ── 运行状态 ──
     private volatile bool _running;
     private long _frameCount;
     private float _volume = 1.0f;
+
+    // ── FEC 丢包补偿 ──
+    private ushort _lastSeq;
+    private bool _hasLastSeq;
+    private long _lostFrames;
+    private long _fecRecovered;
+
+    // ── Jitter Buffer（抵抚网络抖动） ──
+    private readonly JitterBuffer _jitterBuffer = new(capacity: 5, preFillCount: 3);
+    private Timer? _playbackTimer;  // 20ms 定时拉取帧
 
     // ── 音频看门狗（断线检测） ──
     private DateTime _lastAudioTime = DateTime.MinValue;   // 最后收到音频帧的时间
@@ -63,8 +76,6 @@ public sealed class AudioEngine : IDisposable
     // ── 字节数组池（减少 GC 压力） ──
     private static readonly ArrayPool<byte> BytePool = ArrayPool<byte>.Shared;
 
-    private const int RecvTimeoutMs = 1000;
-
     // ── 生命周期 ──
 
     /// <summary>启动 UDP 监听 + 音频路由，Stop 后可重新 Start</summary>
@@ -72,44 +83,25 @@ public sealed class AudioEngine : IDisposable
     {
         if (_running) return;
 
-        // 端口绑定冲突时自动重试（最多 5 次，间隔递增）
-        const int maxRetries = 5;
-        UdpClient? sock = null;
-        for (int retry = 0; retry < maxRetries; retry++)
+        if (_transport == null)
         {
-            try
-            {
-                sock = new UdpClient(Port);
-                sock.Client.ReceiveTimeout = RecvTimeoutMs;
-                break;
-            }
-            catch (Exception ex) when (retry < maxRetries - 1)
-            {
-                Log.E("AudioEngine", $"Port {Port} bind failed (attempt {retry + 1}): {ex.Message}");
-                Thread.Sleep((retry + 1) * 500);
-            }
-        }
-
-        if (sock == null)
-        {
-            Log.E("AudioEngine", $"Port {Port} bind failed after {maxRetries} attempts.");
+            Log.E("AudioEngine", "No ITransport provided, cannot start.");
             return;
         }
 
         _running = true;
-        _sock = sock;
         Reset();
         _router.Start();
 
         // 启动音频看门狗（每 500ms 检测一次音频超时）
         _watchdogTimer = new Timer(_ => CheckWatchdog(), null, 500, 500);
 
-        _recvThread = new Thread(RecvLoop)
-        {
-            IsBackground = true,
-            Name = "audio-recv",
-        };
-        _recvThread.Start();
+        // 启动 Jitter Buffer 播放定时器（每 20ms 拉取一帧）
+        _playbackTimer = new Timer(_ => PlaybackTick(), null, 20, 20);
+
+        // 订阅 Transport 数据包事件，启动接收循环
+        _transport.PacketReceived += OnPacketReceived;
+        _ = _transport.ConnectAsync();
     }
 
     /// <summary>停止 UDP 监听 + 音频路由</summary>
@@ -121,15 +113,16 @@ public sealed class AudioEngine : IDisposable
         _watchdogTimer?.Dispose();
         _watchdogTimer = null;
 
-        _sock?.Close();
-        _sock?.Dispose();
-        _sock = null;
+        // 停止 Jitter Buffer 播放定时器
+        _playbackTimer?.Dispose();
+        _playbackTimer = null;
 
-        if (_recvThread != null && _recvThread.IsAlive && !_recvThread.Join(500))
+        // 取消订阅并断开 Transport
+        if (_transport != null)
         {
-            // 线程未正常退出，不阻塞
+            _transport.PacketReceived -= OnPacketReceived;
+            _ = _transport.DisconnectAsync();
         }
-        _recvThread = null;
 
         _router.Stop();
     }
@@ -161,6 +154,11 @@ public sealed class AudioEngine : IDisposable
         _frameCount = 0;
         _lastAudioTime = DateTime.MinValue;
         _watchdogFired = false;
+        _hasLastSeq = false;
+        _lastSeq = 0;
+        _lostFrames = 0;
+        _fecRecovered = 0;
+        _jitterBuffer.Reset();
     }
 
     // ── 音频看门狗 ──
@@ -174,74 +172,85 @@ public sealed class AudioEngine : IDisposable
         {
             _watchdogFired = true;
             _frameCount = 0; // 重置帧计数，使 OnFirstFrameDecoded 能在恢复时重新触发
+
+            // 重置 JitterBuffer 和 seq 追踪，为新连接做准备
+            _jitterBuffer.Reset();
+            _hasLastSeq = false;
+            _lastSeq = 0;
+
             OnAudioTimeout?.Invoke();
         }
     }
 
-    // ── UDP 接收循环 ──
-    // 阻塞等待数据 → 解析 14B PacketHeader → Opus 解码 → 路由分发
-    private void RecvLoop()
+    // ── 数据包接收回调（由 ITransport.PacketReceived 事件触发） ──
+    // 通过 IPacketProtocol 解码 → Opus 解码 → 路由分发
+    private void OnPacketReceived(ReadOnlyMemory<byte> data)
     {
-        var ep = new IPEndPoint(IPAddress.Any, 0);
+        if (!_running) return;
 
-        while (_running)
+        try
         {
+            // ── 通过 IPacketProtocol 解码数据包 ──
+            var packet = _protocol.Decode(data.Span);
+            if (packet == null) return; // 校验失败，丢弃
+
+            // 仅处理 AUDIO 类型包（握手包由 HandshakeServer 处理）
+            if (packet.Value.Type != PacketType.Audio) return;
+
+            var opusData = packet.Value.Payload;
+            ushort seq = packet.Value.Sequence;
+            int opusLen = opusData.Length;
+            byte[] opus = BytePool.Rent(opusLen);
             try
             {
-                var sock = _sock;
-                if (sock == null) { Thread.Sleep(10); continue; }
+                Buffer.BlockCopy(opusData, 0, opus, 0, opusLen);
 
-                byte[]? data;
-                try
+                // ── FEC 丢包补偿：检测 seq 跳号，用当前包的冗余数据恢复丢失帧 ──
+                if (_hasLastSeq)
                 {
-                    data = sock.Receive(ref ep);
-                }
-                catch (SocketException se) when (se.SocketErrorCode == SocketError.TimedOut)
-                {
-                    continue;
-                }
-                if (data == null || data.Length < PacketHeader.HeaderSize) continue;
-
-                // ── 解析 14B PacketHeader ──
-                var info = PacketHeader.TryDecode(data);
-                if (info == null) continue; // 校验失败，丢弃
-
-                // 仅处理 AUDIO 类型包（握手包由 HandshakeServer 处理）
-                if (info.Value.Type != (byte)PacketType.Audio) continue;
-
-                int opusLen = info.Value.PayloadLen;
-                byte[] opus = BytePool.Rent(opusLen);
-                try
-                {
-                    Buffer.BlockCopy(data, PacketHeader.HeaderSize, opus, 0, opusLen);
-
-                    var pcm = DecodeAndProcess(opus.AsSpan(0, opusLen));
-                    if (pcm != null)
+                    int gap = (ushort)(seq - _lastSeq);
+                    if (gap == 2) // 恰好丢了 1 帧 → 用 FEC 恢复
                     {
-                        // 更新最后音频时间（看门狗恢复计时）
-                        _lastAudioTime = DateTime.UtcNow;
-                        _watchdogFired = false;
-
-                        _router.OnAudioFrame(pcm);
-                        if (_frameCount == 0)
+                        var fecPcm = DecodeFec(opus.AsSpan(0, opusLen));
+                        if (fecPcm != null)
                         {
-                            OnFirstFrameDecoded?.Invoke();
+                            _fecRecovered++;
+                            _jitterBuffer.Push((ushort)(seq - 1), fecPcm);
                         }
-                        _frameCount++;
                     }
+                    else if (gap > 2 && gap < 1000) // 丢了多帧（排除新会话误判）
+                    {
+                        _lostFrames += gap - 1;
+                    }
+                    // gap >= 1000 视为新会话（Android 重新推流 seq 重置），不统计丢包
                 }
-                finally
+                _lastSeq = seq;
+                _hasLastSeq = true;
+
+                var pcm = DecodeAndProcess(opus.AsSpan(0, opusLen));
+                if (pcm != null)
                 {
-                    BytePool.Return(opus);
+                    // 更新最后音频时间（看门狗恢复计时）
+                    _lastAudioTime = DateTime.UtcNow;
+                    _watchdogFired = false;
+
+                    // 推入 Jitter Buffer（由播放定时器匀速拉取）
+                    _jitterBuffer.Push(seq, pcm);
+                    if (Interlocked.Read(ref _frameCount) == 0)
+                    {
+                        OnFirstFrameDecoded?.Invoke();
+                    }
+                    Interlocked.Increment(ref _frameCount);
                 }
             }
-            catch (ObjectDisposedException) { break; }
-            catch (SocketException) { break; }
-            catch (Exception ex)
+            finally
             {
-                Log.E("AudioEngine", $"RecvLoop error: {ex.Message}");
-                Thread.Sleep(10);
+                BytePool.Return(opus);
             }
+        }
+        catch (Exception ex)
+        {
+            Log.E("AudioEngine", $"OnPacketReceived error: {ex.Message}");
         }
     }
 
@@ -282,5 +291,42 @@ public sealed class AudioEngine : IDisposable
             Log.E("AudioEngine", $"Decode error (opus len={opus.Length}): {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>用当前包的 FEC 冗余数据恢复丢失的前一帧</summary>
+    private float[]? DecodeFec(ReadOnlySpan<byte> currentOpus)
+    {
+        try
+        {
+            var pcm = new short[FrameSize];
+#pragma warning disable CS0618
+            // decodeFEC=true：告诉解码器用当前包内嵌的冗余数据恢复丢失帧
+            int n = _decoder.Decode(currentOpus.ToArray(), 0, currentOpus.Length, pcm, 0, FrameSize, true);
+#pragma warning restore CS0618
+            if (n <= 0) return null;
+
+            var pcmFloat = new float[n];
+            for (int i = 0; i < n; i++)
+                pcmFloat[i] = pcm[i] / 32768f * _volume;
+            return pcmFloat;
+        }
+        catch
+        {
+            return null; // FEC 恢复失败不影响正常流程
+        }
+    }
+
+    // ── Jitter Buffer 播放定时器回调（每 20ms） ──
+    // 从缓冲中匀速拉取一帧写入 AudioRouter，保证播放节奏稳定
+    private void PlaybackTick()
+    {
+        if (!_running) return;
+
+        var pcm = _jitterBuffer.Pull();
+        if (pcm != null)
+        {
+            _router.OnAudioFrame(pcm);
+        }
+        // pcm == null 表示 underrun，BufferedWaveProvider 会自动填充静音
     }
 }

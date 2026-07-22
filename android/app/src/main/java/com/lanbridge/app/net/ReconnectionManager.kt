@@ -27,7 +27,7 @@ import kotlinx.coroutines.*
  * ## 触发源（五路）
  * 1. WiFi 断连 — NetworkCallback.onLost
  * 2. HELLO 失败 — doHandshake 返回 false
- * 3. Socket 异常 — UdpSender 或握手 socket 异常
+ * 3. Socket 异常 — UdpTransport 或握手 Transport 异常
  * 4. 音频发送异常 — AudioPipeline 发送失败
  * 5. 用户手动重连 — UI 按钮
  */

@@ -85,14 +85,14 @@ public class ConnectionStateManager
     {
         return State switch
         {
-            ConnectionState.Idle => to is ConnectionState.Searching or ConnectionState.Error,
-            ConnectionState.Disconnected => to is ConnectionState.Searching or ConnectionState.Idle or ConnectionState.Error,
+            ConnectionState.Idle => to is ConnectionState.Searching or ConnectionState.Connecting or ConnectionState.Disconnected or ConnectionState.Error,
+            ConnectionState.Disconnected => to is ConnectionState.Searching or ConnectionState.Connecting or ConnectionState.Idle or ConnectionState.Error,
             ConnectionState.Searching => to is ConnectionState.Found or ConnectionState.Disconnected or ConnectionState.Error,
             ConnectionState.Found => to is ConnectionState.Connecting or ConnectionState.Disconnected or ConnectionState.Error,
             ConnectionState.Connecting => to is ConnectionState.Connected or ConnectionState.Error or ConnectionState.Disconnected,
             ConnectionState.Connected => to is ConnectionState.Streaming or ConnectionState.Disconnected or ConnectionState.Error,
             ConnectionState.Streaming => to is ConnectionState.Reconnecting or ConnectionState.Disconnected or ConnectionState.Error,
-            ConnectionState.Reconnecting => to is ConnectionState.Connected or ConnectionState.Searching or ConnectionState.Disconnected or ConnectionState.Error,
+            ConnectionState.Reconnecting => to is ConnectionState.Connecting or ConnectionState.Connected or ConnectionState.Searching or ConnectionState.Disconnected or ConnectionState.Error,
             ConnectionState.Error => to is ConnectionState.Disconnected or ConnectionState.Idle,
             _ => false
         };
