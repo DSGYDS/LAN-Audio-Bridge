@@ -246,17 +246,20 @@ public partial class MainWindow : Window
     /// <summary>P2P 连接后主动向 Android GO 发 HELLO 握手</summary>
     private async Task SendHelloToAndroidGo()
     {
+        ITransport? transport = null;
         try
         {
-            var goIp = _p2pHelper?.GoIp ?? "192.168.49.1";
+            var goIp = _p2pHelper?.GoIp ?? WifiDirectLink.GoIp;
             var token = _p2pHelper?.Token ?? "";
-            Log.I("MainWindow", $"Sending HELLO to Android GO: {goIp}:12347");
+            Log.I("MainWindow", $"Sending HELLO to Android GO: {goIp}:{WifiDirectLink.HandshakePort}");
 
-            using var client = new System.Net.Sockets.UdpClient();
-            client.Client.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Any, 0));
+            // 通过 PlatformFactory 创建传输层（不直调 UdpClient）
+            transport = PlatformFactory.CreateTransport(
+                TransportType.Udp, goIp, WifiDirectLink.HandshakePort);
+            var protocol = PlatformFactory.CreateProtocol();
+            await transport.ConnectAsync();
 
             // 构建 HELLO 包（payload: 1B route + 8B token）
-            var protocol = new LanAudioBridge.Core.Adapters.PacketHeaderAdapter();
             var tokenBytes = Encoding.ASCII.GetBytes(token);
             var payload = new byte[9];
             payload[0] = 0; // route mode 0
@@ -265,7 +268,7 @@ public partial class MainWindow : Window
             var packet = new Packet
             {
                 Type = PacketType.Hello,
-                LinkType = 0x02,  // WIFI_DIRECT
+                LinkType = WifiDirectLink.LinkTypeId,
                 Sequence = 0,
                 Payload = payload
             };
@@ -274,35 +277,34 @@ public partial class MainWindow : Window
             // 重发 3 次（P2P 链路 ARP 可能丢弃前几包）
             for (int i = 0; i < 3; i++)
             {
-                await client.SendAsync(encoded, new System.Net.IPEndPoint(System.Net.IPAddress.Parse(goIp), 12347));
-                Log.I("MainWindow", $"HELLO sent to {goIp}:12347 (attempt {i + 1}/3)");
+                await transport.SendAsync(encoded);
+                Log.I("MainWindow", $"HELLO sent to {goIp}:{WifiDirectLink.HandshakePort} (attempt {i + 1}/3)");
 
                 // 等待 HELLO_ACK（2s 超时）
                 try
                 {
-                    using var cts = new CancellationTokenSource(2000);
-                    var result = await client.ReceiveAsync(cts.Token);
-                    var reply = protocol.Decode(result.Buffer);
-                    if (reply.HasValue && reply.Value.Type == PacketType.HelloAck)
+                    var reply = await WaitForPacketAsync(transport, 2000);
+                    if (reply != null)
                     {
-                        // 从 HELLO_ACK payload 读取 Android 选择的路线
-                        int route = 0;
-                        if (reply.Value.Payload.Length >= 1)
-                            route = Math.Clamp((int)reply.Value.Payload[0], 0, 3);
-
-                        Log.I("MainWindow", $"HELLO_ACK received! P2P handshake OK, route={route}");
-
-                        // 设置 AudioRouter 模式（与 LAN 模式的 OnHandshakeRoute 相同逻辑）
-                        OnHandshakeRoute(route);
-
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                        var decoded = protocol.Decode(reply.Value.Span);
+                        if (decoded.HasValue && decoded.Value.Type == PacketType.HelloAck)
                         {
-                            P2pStatusText.Text = $"P2P 握手成功 ✓ local={_p2pHelper?.LocalIp} go={goIp} route={route}";
-                            P2pProgressRing.IsIndeterminate = false;
-                            P2pProgressRing.Value = 100;
-                        });
-                        _stateManager.Update(ConnectionState.Connected);
-                        return;
+                            int route = 0;
+                            if (decoded.Value.Payload.Length >= 1)
+                                route = Math.Clamp((int)decoded.Value.Payload[0], 0, 3);
+
+                            Log.I("MainWindow", $"HELLO_ACK received! P2P handshake OK, route={route}");
+                            OnHandshakeRoute(route);
+
+                            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                            {
+                                P2pStatusText.Text = $"P2P 握手成功 ✓ local={_p2pHelper?.LocalIp} go={goIp} route={route}";
+                                P2pProgressRing.IsIndeterminate = false;
+                                P2pProgressRing.Value = 100;
+                            });
+                            _stateManager.Update(ConnectionState.Connected);
+                            return;
+                        }
                     }
                 }
                 catch (OperationCanceledException) { /* timeout, retry */ }
@@ -318,5 +320,20 @@ public partial class MainWindow : Window
         {
             Log.E("MainWindow", $"SendHelloToAndroidGo error: {ex.Message}");
         }
+        finally
+        {
+            if (transport != null) await transport.DisconnectAsync();
+        }
+    }
+
+    /// <summary>等待 ITransport 收到一个数据包（超时返回 null）</summary>
+    private static async Task<ReadOnlyMemory<byte>?> WaitForPacketAsync(ITransport transport, int timeoutMs)
+    {
+        var tcs = new TaskCompletionSource<ReadOnlyMemory<byte>>();
+        using var cts = new CancellationTokenSource(timeoutMs);
+        using var reg = cts.Token.Register(() => tcs.TrySetCanceled());
+        transport.PacketReceived += data => tcs.TrySetResult(data);
+        try { return await tcs.Task; }
+        catch (OperationCanceledException) { return null; }
     }
 }

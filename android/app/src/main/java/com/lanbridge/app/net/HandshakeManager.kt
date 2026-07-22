@@ -1,7 +1,8 @@
 package com.lanbridge.app.net
 
-import com.lanbridge.app.core.adapters.PacketHeaderAdapter
 import com.lanbridge.app.core.adapters.UdpTransport
+import com.lanbridge.app.core.enums.TransportType
+import com.lanbridge.app.core.factory.PlatformFactory
 import com.lanbridge.app.core.infrastructure.Log
 import com.lanbridge.app.core.interfaces.Packet
 import kotlinx.coroutines.CompletableDeferred
@@ -32,7 +33,7 @@ object HandshakeManager {
     private const val HANDSHAKE_PORT = 12347
     private const val TIMEOUT_MS = 500L       // LAN 模式超时
     private const val P2P_TIMEOUT_MS = 3000L  // P2P 模式超时（链路延迟较高）
-    private val protocol = PacketHeaderAdapter()
+    private val protocol = PlatformFactory.createProtocol()
 
     /** P2P 模式下 Android 端 P2P 接口本地 IP（LAN 模式为 null） */
     var p2pLocalIp: String? = null
@@ -56,7 +57,9 @@ object HandshakeManager {
         return try {
             Log.i(TAG, "waitForHello: listening on 0.0.0.0:$HANDSHAKE_PORT, token=${expectedToken?.take(4)}...")
             // 服务端模式：监听 12347
-            transport = UdpTransport(localPort = HANDSHAKE_PORT)
+            transport = PlatformFactory.createTransport(
+                type = TransportType.Udp, port = HANDSHAKE_PORT
+            ) as UdpTransport
             val helloReceived = CompletableDeferred<Pair<ByteArray, String>>()  // data + remote IP
 
             transport.onPacketReceived = { data ->
@@ -142,7 +145,10 @@ object HandshakeManager {
         var transport: UdpTransport? = null
         return try {
             Log.i(TAG, "tryHandshake: host=$host, route=$route, token=${token?.take(4)}..., linkType=$linkType, p2pLocalIp=$p2pLocalIp")
-            transport = UdpTransport(localPort = 0, remoteHost = host, remotePort = HANDSHAKE_PORT, localBindAddress = p2pLocalIp)
+            transport = PlatformFactory.createTransport(
+                type = TransportType.Udp, host = host, port = HANDSHAKE_PORT,
+                localBindAddress = p2pLocalIp
+            ) as UdpTransport
             val reply = CompletableDeferred<ByteArray?>()
             transport.onPacketReceived = { data -> reply.complete(data) }
             runBlocking { transport.connect() }
@@ -196,7 +202,10 @@ object HandshakeManager {
     fun sendRouteUpdate(host: String, route: Int, linkType: Byte = LinkType.WIFI_LAN) {
         var transport: UdpTransport? = null
         try {
-            transport = UdpTransport(localPort = 0, remoteHost = host, remotePort = HANDSHAKE_PORT, localBindAddress = p2pLocalIp)
+            transport = PlatformFactory.createTransport(
+                type = TransportType.Udp, host = host, port = HANDSHAKE_PORT,
+                localBindAddress = p2pLocalIp
+            ) as UdpTransport
             runBlocking { transport.connect() }
 
             // 编码并发送 ROUTE 包

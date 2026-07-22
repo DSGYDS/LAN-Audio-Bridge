@@ -3,6 +3,7 @@ package com.lanbridge.app.audio
 import android.content.Context
 import android.media.projection.MediaProjection
 import com.lanbridge.app.core.adapters.UdpTransport
+import com.lanbridge.app.core.enums.TransportType
 import com.lanbridge.app.core.factory.PlatformFactory
 import com.lanbridge.app.core.infrastructure.Log
 import com.lanbridge.app.core.interfaces.Packet
@@ -75,7 +76,12 @@ class AudioPipeline {
         if (!enc.prepare()) return false
         if (host != null) {
             try {
-                val t = UdpTransport(localPort = 0, remoteHost = host, remotePort = port, localBindAddress = com.lanbridge.app.net.HandshakeManager.p2pLocalIp)
+                val t = PlatformFactory.createTransport(
+                    type = TransportType.Udp,
+                    host = host,
+                    port = port,
+                    localBindAddress = com.lanbridge.app.net.HandshakeManager.p2pLocalIp
+                ) as UdpTransport
                 runBlocking { t.connect() }
                 transport = t
             } catch (e: Exception) {

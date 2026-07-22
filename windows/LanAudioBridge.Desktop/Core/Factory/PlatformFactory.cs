@@ -20,11 +20,15 @@ public static class PlatformFactory
     /// 创建传输层实例。
     /// 当前所有链路共用 UDP 传输，后续链路分离后由各链路文件提供专属工厂方法。
     /// </summary>
-    public static ITransport CreateTransport(TransportType type, string? host = null, int port = 12345)
+    /// <param name="type">传输类型</param>
+    /// <param name="host">远程主机（null = server 模式）</param>
+    /// <param name="port">端口（server 模式为绑定端口，client 模式为远程端口）</param>
+    /// <param name="localPort">本地绑定端口（0 = 随机，仅 client 模式）</param>
+    public static ITransport CreateTransport(TransportType type, string? host = null, int port = 12345, int localPort = 0)
     {
         if (type != TransportType.Udp)
             throw new System.ArgumentOutOfRangeException(nameof(type), $"Unsupported transport: {type}");
-        return new UdpTransport(port, host, port);
+        return new UdpTransport(host != null ? localPort : port, host, port);
     }
 
     /// <summary>创建协议编解码实例</summary>
