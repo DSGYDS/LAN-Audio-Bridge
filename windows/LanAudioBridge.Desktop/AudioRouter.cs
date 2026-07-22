@@ -113,7 +113,8 @@ public sealed class AudioRouter : IDisposable
         lock (_lock)
         {
             if (_disposed) return false;
-            if (_mode == newMode) return OutputsReady(newMode);
+            if (_mode == newMode && OutputsReady(newMode)) return true; // 同模式且设备就绪，无需操作
+            // 同模式但设备未就绪（如被外部 Stop 过）→ 继续执行完整 stop-start 重启流程
 
             // 切到虚拟麦克风模式前先确认 CABLE 设备存在
             if (newMode is RouteMode.MicOnly or RouteMode.MicOnlySys or RouteMode.Both)

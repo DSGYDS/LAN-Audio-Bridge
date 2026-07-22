@@ -73,9 +73,9 @@ public partial class MainWindow : Window
             _ => AudioRouter.RouteMode.SpeakerOnly,
         };
 
-        // 强制重启音频输出设备（解决初次连接时 WaveOutEvent 空跑后不出声的问题）
-        _engine.Router.Stop();
-
+        // 注意：不能在此处调用 Router.Stop()！
+        // Stop() 置空 _speakerOut 后，SetMode(相同模式) 走短路分支返回 false → HELLO_NACK → 握手失败
+        // SetMode 内部已包含完整 stop-start 逻辑，无需外部预 Stop
         if (!_engine.Router.SetMode(mode))
         {
             Log.W("MainWindow", $"Route {route} rejected (CABLE not available?)");
