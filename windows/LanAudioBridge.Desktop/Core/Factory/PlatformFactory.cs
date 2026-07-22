@@ -17,15 +17,14 @@ public static class PlatformFactory
     public static ILogger CreateLogger() => new ConsoleLogger();
 
     /// <summary>
-    /// 按 TransportType 创建传输层实例。
+    /// 创建传输层实例。
+    /// 当前所有链路共用 UDP 传输，后续链路分离后由各链路文件提供专属工厂方法。
     /// </summary>
     public static ITransport CreateTransport(TransportType type, string? host = null, int port = 12345)
     {
-        return type switch
-        {
-            TransportType.Udp => new UdpTransport(port, host, port),
-            _ => throw new System.ArgumentOutOfRangeException(nameof(type), $"Unsupported transport: {type}")
-        };
+        if (type != TransportType.Udp)
+            throw new System.ArgumentOutOfRangeException(nameof(type), $"Unsupported transport: {type}");
+        return new UdpTransport(port, host, port);
     }
 
     /// <summary>创建协议编解码实例</summary>

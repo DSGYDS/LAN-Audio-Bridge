@@ -15,11 +15,8 @@ public enum PacketType : byte
     Audio     = 0x06,   // Android→Win: 音频帧, payload=纯 Opus
 }
 
-/// <summary>
-/// LinkType — 四级链路类型标识（包头 [6] 字段）
-/// </summary>
-public static class LinkType
-{
-    public const byte WifiLan   = 0x01;
-    public const byte WifiDirect = 0x02;
-}
+// 链路类型标识已迁移到各链路独立文件：
+//   Links/WifiLan/WifiLanLink.cs     → LinkTypeId = 0x01
+//   Links/WifiDirect/WifiDirectLink.cs → LinkTypeId = 0x02
+//   Links/Bluetooth/BluetoothLink.cs  → LinkTypeId = 0x03
+//   Links/Usb/UsbLink.cs             → LinkTypeId = 0x04

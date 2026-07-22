@@ -8,6 +8,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Media.Imaging;
 using LanAudioBridge.Core;
 using LanAudioBridge.Core.Adapters;
+using LanAudioBridge.Desktop.Links;
 using LanAudioBridge.Core.Factory;
 using LanAudioBridge.Core.Infrastructure;
 

@@ -24,6 +24,9 @@ enum class PacketType(val code: Byte) {
 
 /**
  * LinkType — 四级链路类型标识（包头 [6] 字段）
+ *
+ * 注意：链路常量已迁移到各链路独立文件（links/wifilan、links/wifidirect 等），
+ * 此处的 LinkType 仅供过渡期兼容，后续拆分握手/传输代码时逐步替换为链路文件引用。
  */
 object LinkType {
     const val WIFI_LAN: Byte = 0x01
