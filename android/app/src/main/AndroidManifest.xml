@@ -10,13 +10,15 @@
     <!-- 网络 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- WiFi 状态（mDNS） -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- QR 扫码 -->
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- WiFi Direct（Android 12- 需位置，13+ 用 NEARBY_WIFI_DEVICES） -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <!-- 通知（前台服务必需） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

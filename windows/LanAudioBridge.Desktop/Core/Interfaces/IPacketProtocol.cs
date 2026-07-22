@@ -9,6 +9,7 @@ namespace LanAudioBridge.Core;
 public struct Packet
 {
     public PacketType Type;
+    public byte LinkType;
     public ushort Sequence;
     public byte[] Payload;
 }

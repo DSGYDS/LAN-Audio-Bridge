@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using System.Threading;
 using LanAudioBridge.Core;
 using LanAudioBridge.Core.Infrastructure;
@@ -17,6 +18,9 @@ public sealed class HandshakeServer : IDisposable
     private volatile bool _running;
     private Func<int, bool>? _onModeChange;
     public Action<string>? OnError;
+
+    /// <summary>P2P 模式下的期望 Token（LAN 模式为 null 不校验）</summary>
+    public string? ExpectedToken { get; set; }
 
     // ── ROUTE 防抖（快速切换只执行最后一次） ──
     private Timer? _routeDebounceTimer;
@@ -106,21 +110,46 @@ public sealed class HandshakeServer : IDisposable
 
             var type = packet.Value.Type;
             var payload = packet.Value.Payload;
+            var linkType = packet.Value.LinkType;
 
-            // ── HELLO — 手机端发起首次连接（payload: 1B routeMode） ──
+            // ── HELLO — 手机端发起首次连接（payload: 1B routeMode [+ 8B token]） ──
             if (type == PacketType.Hello)
             {
+                Log.I("HandshakeServer", $"HELLO received: linkType={linkType}, payloadLen={payload.Length}, expectedToken={ExpectedToken ?? "(null)"}");
+
                 int routeMode = 0;
                 if (payload.Length >= 1)
                     routeMode = Math.Clamp((int)payload[0], 0, 3);
+
+                // Token 校验（P2P 模式）
+                if (ExpectedToken != null)
+                {
+                    if (payload.Length < 9)
+                    {
+                        // P2P 模式但 HELLO 未携带 token → 拒绝
+                        var nack = new Packet { Type = PacketType.HelloNack, LinkType = linkType, Sequence = 0, Payload = Array.Empty<byte>() };
+                        _ = _transport!.SendAsync(_protocol.Encode(nack));
+                        Log.W("HandshakeServer", "HELLO rejected: missing token (P2P mode)");
+                        return;
+                    }
+                    var tokenStr = Encoding.ASCII.GetString(payload, 1, 8);
+                    if (tokenStr != ExpectedToken)
+                    {
+                        var nack = new Packet { Type = PacketType.HelloNack, LinkType = linkType, Sequence = 0, Payload = Array.Empty<byte>() };
+                        _ = _transport!.SendAsync(_protocol.Encode(nack));
+                        Log.W("HandshakeServer", $"HELLO rejected: token mismatch (got={tokenStr})");
+                        return;
+                    }
+                }
 
                 OnHelloReceived?.Invoke(routeMode);
                 bool accepted = _onModeChange?.Invoke(routeMode) ?? true;
 
                 // 回复 HELLO_ACK 或 HELLO_NACK
                 var replyType = accepted ? PacketType.HelloAck : PacketType.HelloNack;
-                var replyPacket = new Packet { Type = replyType, Sequence = 0, Payload = Array.Empty<byte>() };
+                var replyPacket = new Packet { Type = replyType, LinkType = linkType, Sequence = 0, Payload = Array.Empty<byte>() };
                 _ = _transport!.SendAsync(_protocol.Encode(replyPacket));
+                Log.I("HandshakeServer", $"HELLO reply sent: {replyType}, route={routeMode}");
             }
             // ── ROUTE — 推流中热切路线（payload: 1B newRouteMode） ──
             else if (type == PacketType.Route)
@@ -132,7 +161,7 @@ public sealed class HandshakeServer : IDisposable
                 }
 
                 // 回复 ROUTE_ACK 确认路由切换
-                var ackPacket = new Packet { Type = PacketType.RouteAck, Sequence = 0, Payload = Array.Empty<byte>() };
+                var ackPacket = new Packet { Type = PacketType.RouteAck, LinkType = linkType, Sequence = 0, Payload = Array.Empty<byte>() };
                 _ = _transport!.SendAsync(_protocol.Encode(ackPacket));
             }
         }

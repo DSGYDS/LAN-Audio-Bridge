@@ -6,6 +6,7 @@ import com.lanbridge.app.core.adapters.UdpTransport
 import com.lanbridge.app.core.factory.PlatformFactory
 import com.lanbridge.app.core.infrastructure.Log
 import com.lanbridge.app.core.interfaces.Packet
+import com.lanbridge.app.net.LinkType
 import com.lanbridge.app.net.PacketType
 import kotlinx.coroutines.runBlocking
 
@@ -54,6 +55,7 @@ class AudioPipeline {
     @Volatile private var streaming = false    // 推流运行中
     @Volatile private var stopping = false     // 请求停止（用于线程退出）
     @Volatile private var mode = MODE_MIC      // 当前采集模式
+    @Volatile var currentLinkType: Byte = LinkType.WIFI_LAN  // 当前链路类型
     private var cb: ((ByteArray, Int) -> Unit)? = null  // 原始 Opus 回调（调试用）
     private var thread: Thread? = null
     private val frameAssembler = PcmFrameAssembler(FRAME_BYTES)  // PCM 拼帧器
@@ -69,7 +71,7 @@ class AudioPipeline {
         if (!enc.prepare()) return false
         if (host != null) {
             try {
-                val t = UdpTransport(localPort = 0, remoteHost = host, remotePort = port)
+                val t = UdpTransport(localPort = 0, remoteHost = host, remotePort = port, localBindAddress = com.lanbridge.app.net.HandshakeManager.p2pLocalIp)
                 runBlocking { t.connect() }
                 transport = t
             } catch (e: Exception) {
@@ -205,7 +207,7 @@ class AudioPipeline {
     /** 通过 ITransport 发送一个 Opus 帧（协议编码 + UDP 发送） */
     private fun sendOpusFrame(opus: ByteArray, seq: Int) {
         val t = transport ?: return
-        val packet = Packet(PacketType.AUDIO, seq.toUShort(), opus)
+        val packet = Packet(PacketType.AUDIO, currentLinkType, seq.toUShort(), opus)
         val encoded = protocol.encode(packet)
         t.sendBlocking(encoded)
     }

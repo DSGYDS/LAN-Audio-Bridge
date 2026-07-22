@@ -22,3 +22,14 @@ enum class PacketType(val code: Byte) {
         fun fromCode(code: Byte): PacketType? = map[code]
     }
 }
+
+/**
+ * LinkType — 四级链路类型标识（包头 [6] 字段）
+ */
+object LinkType {
+    const val UNKNOWN: Byte = 0x00
+    const val WIFI_LAN: Byte = 0x01
+    const val WIFI_DIRECT: Byte = 0x02
+    const val BLUETOOTH: Byte = 0x03
+    const val USB: Byte = 0x04
+}

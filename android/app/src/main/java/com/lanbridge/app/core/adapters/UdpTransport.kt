@@ -6,6 +6,7 @@ import com.lanbridge.app.core.interfaces.ITransport
 import kotlinx.coroutines.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 
 /**
@@ -17,14 +18,23 @@ import java.net.InetSocketAddress
 class UdpTransport(
     private val localPort: Int,
     private val remoteHost: String? = null,
-    private val remotePort: Int? = null
+    private val remotePort: Int? = null,
+    private val localBindAddress: String? = null  // P2P 模式：绑定到 P2P 接口本地 IP
 ) : ITransport {
-    // client 模式绑定随机端口，server 模式绑定指定端口
-    private val socket: DatagramSocket = if (remoteHost != null) DatagramSocket()
-                                         else DatagramSocket(localPort)
+    // client 模式绑定随机端口（可指定本地地址），server 模式绑定指定端口
+    private val socket: DatagramSocket = when {
+        remoteHost != null && localBindAddress != null ->
+            DatagramSocket(0, InetAddress.getByName(localBindAddress))
+        remoteHost != null -> DatagramSocket()
+        else -> DatagramSocket(localPort)
+    }
     private var _isConnected = false
     private var scope: CoroutineScope? = null
     private val recvBuf = ByteArray(65507) // 最大 UDP 包
+
+    /** 服务端模式：最后收到包的远端 IP */
+    var lastRemoteHost: String? = null
+        private set
 
     override suspend fun connect() {
         if (_isConnected) return
@@ -68,11 +78,24 @@ class UdpTransport(
         }
     }
 
+    /**
+     * 服务端模式：发送数据到指定远端地址
+     */
+    fun sendTo(data: ByteArray, host: String, port: Int) {
+        try {
+            val packet = DatagramPacket(data, data.size, InetAddress.getByName(host), port)
+            socket.send(packet)
+        } catch (e: Exception) {
+            Log.e("UdpTransport", "sendTo error: ${e.message}")
+        }
+    }
+
     private suspend fun receiveLoop() = withContext(Dispatchers.IO) {
         while (isActive && _isConnected) {
             try {
                 val packet = DatagramPacket(recvBuf, recvBuf.size)
                 socket.receive(packet)
+                lastRemoteHost = packet.address.hostAddress  // 记录远端 IP
                 val bytes = packet.data.copyOfRange(0, packet.length)
                 onPacketReceived?.invoke(bytes)
             } catch (e: CancellationException) { break }

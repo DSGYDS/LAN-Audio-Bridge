@@ -28,9 +28,13 @@ import androidx.core.content.ContextCompat
 import com.lanbridge.app.audio.AudioPipeline
 import com.lanbridge.app.net.LanAudioDiscovery
 import com.lanbridge.app.net.HandshakeManager
+import com.lanbridge.app.net.LinkType
 import com.lanbridge.app.net.PacketHeader
 import com.lanbridge.app.net.PacketType
 import com.lanbridge.app.net.ReconnectionManager
+import com.lanbridge.app.net.WifiDirectManager
+import com.lanbridge.app.ui.LabridgeQrCode
+import com.lanbridge.app.ui.QrScannerScreen
 import com.lanbridge.app.ui.theme.LanAudioBridgeTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,6 +68,13 @@ fun MainScreen() {
     var proj by remember { mutableStateOf<MediaProjection?>(null) }
     var projReady by remember { mutableStateOf(false) }
     var route by remember { mutableIntStateOf(0) }
+
+    // ── P2P 扫码状态 ──
+    var showScanner by remember { mutableStateOf(false) }
+    var p2pToken by remember { mutableStateOf<String?>(null) }
+    var p2pTargetIp by remember { mutableStateOf<String?>(null) }  // P2P 模式下 Windows 的 IP（热切 ROUTE 目标）
+    val wifiDirectManager = remember { WifiDirectManager(act) }
+    val p2pStatus by wifiDirectManager.statusFlow.collectAsState()
 
     // ── 连接状态管理器（旁路观测层，不影响 streaming 标志） ──
     val stateManager = remember { ConnectionStateManager() }
@@ -168,7 +179,12 @@ fun MainScreen() {
                                     val needProj = capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX
                                     val ok = pipe.switchMode(capMode, if (needProj && projReady) proj else null, act)
                                     if (!ok) withContext(Dispatchers.Main) { status = "需先授权系统音频" }
-                                    else HandshakeManager.sendRouteUpdate(ip, r)
+                                    else {
+                                        // P2P 模式：ROUTE 发到 Windows P2P IP；LAN 模式：发到电脑 IP
+                                        val targetIp = p2pTargetIp ?: ip
+                                        val lt = if (p2pTargetIp != null) LinkType.WIFI_DIRECT else LinkType.WIFI_LAN
+                                        HandshakeManager.sendRouteUpdate(targetIp, r, lt)
+                                    }
                                 }
                             }
                         }, role = Role.RadioButton
@@ -211,9 +227,18 @@ fun MainScreen() {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Button(onClick = { showDeviceList = !showDeviceList }, modifier = Modifier.height(36.dp))
             { Text("扫描电脑（${discoveredDevices.size}）") }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = { showScanner = true }, modifier = Modifier.height(36.dp))
+            { Text("扫码直连") }
             Spacer(Modifier.weight(1f))
             if (discoveredDevices.isNotEmpty()) Text("已发现 ${discoveredDevices.size} 台",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+        }
+
+        // ── P2P 连接进度 ──
+        if (p2pStatus != "空闲") {
+            Text("P2P: $p2pStatus", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary, modifier = Modifier.padding(vertical = 2.dp))
         }
         if (showDeviceList && discoveredDevices.isNotEmpty()) {
             Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
@@ -244,20 +269,27 @@ fun MainScreen() {
                 if ((capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) && !projReady)
                 { status = "请先授权系统音频"; return@Button }
                 scope.launch {
+                    // P2P 已建立：直接用已有连接握手（跳过扫码/createGroup）
+                    val targetIp = p2pTargetIp ?: ip
+                    val lt = if (p2pTargetIp != null) LinkType.WIFI_DIRECT else LinkType.WIFI_LAN
+                    val token = if (p2pTargetIp != null) p2pToken else null
+
                     stateManager.update(ConnectionState.CONNECTING); status = "正在握手..."
-                    val handshakeOk = withContext(Dispatchers.IO) { HandshakeManager.handshake(ip, route) }
+                    val handshakeOk = withContext(Dispatchers.IO) {
+                        HandshakeManager.handshake(targetIp, route, token, lt)
+                    }
                     if (!handshakeOk) { stateManager.update(ConnectionState.ERROR); status = "握手失败"; return@launch }
                     stateManager.update(ConnectionState.CONNECTED)
                     val ok = withContext(Dispatchers.IO) {
-                        pipe.startStreaming(capMode, if (capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) proj else null, act, ip)
+                        pipe.currentLinkType = lt
+                        pipe.startStreaming(capMode, if (capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) proj else null, act, targetIp)
                     }
                     if (ok) {
                         streaming = true
-                        // 保存最后连接信息供重连使用
-                        reconnectionManager.lastKnownHost = ip
+                        reconnectionManager.lastKnownHost = targetIp
                         reconnectionManager.lastRouteMode = route
                         pipe.onFirstFrame = { stateManager.update(ConnectionState.STREAMING) }
-                        status = "推流中：${routeNames[route]} -> $ip"
+                        status = "推流中：${routeNames[route]} -> $targetIp"
                         act.startForegroundService(Intent(act, StreamingService::class.java))
                     } else { stateManager.update(ConnectionState.ERROR); status = "启动推流失败" }
                 }
@@ -273,6 +305,66 @@ fun MainScreen() {
             else status = "快速测试需要麦克风权限"
         }, modifier = Modifier.fillMaxWidth().height(40.dp))
         { Text("快速测试麦克风编码（3 秒）") }
+    }
+
+    // ── QR 扫码界面（全屏覆盖） ──
+    if (showScanner) {
+        QrScannerScreen(
+            onScanned = { qr ->
+                showScanner = false
+                p2pToken = qr.token
+                status = "扫码成功，正在创建 P2P Group..."
+                scope.launch {
+                    // P2P 连接：Android 做 GO（自带 DHCP，Windows 客户端自动获取 IP）
+                    val goIp = wifiDirectManager.createGroupAndWaitForClient()
+                    if (goIp == null) {
+                        status = "P2P Group 创建失败"
+                        stateManager.update(ConnectionState.ERROR)
+                        return@launch
+                    }
+                    ip = goIp
+                    stateManager.update(ConnectionState.CONNECTING)
+                    status = "P2P GO 就绪 ($goIp)，等待电脑连接并握手..."
+
+                    // 等待 Windows 连接并主动发 HELLO（反转握手方向：Windows→Android）
+                    val handshakeOk = withContext(Dispatchers.IO) {
+                        HandshakeManager.waitForHello(qr.token, route)
+                    }
+                    if (!handshakeOk) {
+                        status = "P2P 握手失败（电脑未发起连接）"
+                        stateManager.update(ConnectionState.ERROR)
+                        return@launch
+                    }
+                    stateManager.update(ConnectionState.CONNECTED)
+                    status = "P2P 握手成功 ✓ 准备推流"
+
+                    // 启动推流（目标 IP = Windows P2P 客户端 IP，由握手时记录）
+                    val winP2pIp = HandshakeManager.lastRemoteIp ?: goIp
+                    p2pTargetIp = winP2pIp  // 保存供热切 ROUTE 使用
+                    val capMode = routeToCapture(route)
+                    if ((capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) && !projReady) {
+                        status = "P2P 握手成功，请先授权系统音频"
+                        return@launch
+                    }
+                    val ok = withContext(Dispatchers.IO) {
+                        pipe.currentLinkType = LinkType.WIFI_DIRECT
+                        pipe.startStreaming(capMode, if (capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) proj else null, act, winP2pIp)
+                    }
+                    if (ok) {
+                        streaming = true
+                        reconnectionManager.lastKnownHost = winP2pIp
+                        reconnectionManager.lastRouteMode = route
+                        pipe.onFirstFrame = { stateManager.update(ConnectionState.STREAMING) }
+                        status = "P2P 推流中：${routeNames[route]}"
+                        act.startForegroundService(Intent(act, StreamingService::class.java))
+                    } else {
+                        status = "P2P 启动推流失败"
+                        stateManager.update(ConnectionState.ERROR)
+                    }
+                }
+            },
+            onDismiss = { showScanner = false }
+        )
     }
 }
 

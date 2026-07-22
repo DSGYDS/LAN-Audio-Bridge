@@ -5,15 +5,16 @@ namespace LanAudioBridge.Desktop;
 /// <summary>
 /// PacketHeader — LAN Audio Bridge 通信协议通用包头。
 ///
-/// 职责：仅负责 14B 包头的编解码，不含任何业务逻辑。
+/// 职责：仅负责 15B 包头的编解码，不含任何业务逻辑。
 /// Sequence 的维护由发送方业务层负责。
 ///
-/// 格式（14 字节）：
+/// 格式（15 字节，Version 0x02）：
 /// [0-3]   Magic:        0x4C414242
-/// [4]     Version:      0x01
+/// [4]     Version:      0x02
 /// [5]     Type:         包类型
-/// [6-9]   Sequence:     uint32 BE
-/// [10-13] PayloadLength: uint32 BE
+/// [6]     LinkType:     链路类型（0x00=Unknown, 0x01=WiFi LAN, 0x02=WiFi Direct, 0x03=BT, 0x04=USB）
+/// [7-10]  Sequence:     uint32 BE
+/// [11-14] PayloadLength: uint32 BE
 ///
 /// 设计约束：
 /// - 无状态（Stateless）：不保存 Sequence、Socket 或任何运行时状态
@@ -25,17 +26,17 @@ public static class PacketHeader
     public const int Magic = 0x4C414242;
 
     /// <summary>当前协议版本</summary>
-    public const byte CurrentVersion = 0x01;
+    public const byte CurrentVersion = 0x02;
 
     /// <summary>包头固定长度</summary>
-    public const int HeaderSize = 14;
+    public const int HeaderSize = 15;
 
     /// <summary>
     /// 编码包头（推荐形式）。
     /// Version 内部写死为 <see cref="CurrentVersion"/>，业务层无需关心。
-    /// 返回 byte[14]，调用方自行在末尾拼接 Payload。
+    /// 返回 byte[15]，调用方自行在末尾拼接 Payload。
     /// </summary>
-    public static byte[] EncodeHeader(byte type, uint seq, int payloadLen)
+    public static byte[] EncodeHeader(byte type, byte linkType, uint seq, int payloadLen)
     {
         var buf = new byte[HeaderSize];
         // 0-3: Magic (大端序)
@@ -44,10 +45,12 @@ public static class PacketHeader
         buf[4] = CurrentVersion;
         // 5: Type
         buf[5] = type;
-        // 6-9: Sequence (uint32 BE)
-        WriteBigEndian32(buf, 6, unchecked((int)seq));
-        // 10-13: PayloadLength (uint32 BE)
-        WriteBigEndian32(buf, 10, payloadLen);
+        // 6: LinkType
+        buf[6] = linkType;
+        // 7-10: Sequence (uint32 BE)
+        WriteBigEndian32(buf, 7, unchecked((int)seq));
+        // 11-14: PayloadLength (uint32 BE)
+        WriteBigEndian32(buf, 11, payloadLen);
         return buf;
     }
 
@@ -75,14 +78,15 @@ public static class PacketHeader
         if (version != CurrentVersion) return null;
 
         byte type = data[5];
-        uint seq = unchecked((uint)ReadBigEndian32(data, 6));
-        int payloadLen = ReadBigEndian32(data, 10);
+        byte linkType = data[6];
+        uint seq = unchecked((uint)ReadBigEndian32(data, 7));
+        int payloadLen = ReadBigEndian32(data, 11);
 
         // 校验 PayloadLength
         int actualPayloadLen = data.Length - HeaderSize;
         if (payloadLen != actualPayloadLen) return null;
 
-        return new PacketHeaderInfo(type, seq, payloadLen);
+        return new PacketHeaderInfo(type, linkType, seq, payloadLen);
     }
 
     // ── 大端序读写工具（手动移位，平台无关） ──
@@ -105,4 +109,4 @@ public static class PacketHeader
 }
 
 /// <summary>包头解码结果（纯数据容器）</summary>
-public readonly record struct PacketHeaderInfo(byte Type, uint Seq, int PayloadLen);
+public readonly record struct PacketHeaderInfo(byte Type, byte LinkType, uint Seq, int PayloadLen);

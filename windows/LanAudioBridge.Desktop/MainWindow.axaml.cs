@@ -1,8 +1,13 @@
 using System;
 using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Media.Imaging;
 using LanAudioBridge.Core;
+using LanAudioBridge.Core.Adapters;
 using LanAudioBridge.Core.Factory;
 using LanAudioBridge.Core.Infrastructure;
 
@@ -23,6 +28,7 @@ public partial class MainWindow : Window
     private readonly MdnsPublisher _mdns = MdnsPublisher.Create(Environment.MachineName, 12345);  // mDNS 服务发布
     private readonly HandshakeServer _hs;                                // 握手服务
     private readonly ConnectionStateManager _stateManager = new();       // 连接状态管理器
+    private WifiDirectP2pHelper? _p2pHelper;                              // WiFi Direct P2P 建链辅助器
 
     public MainWindow()
     {
@@ -60,12 +66,15 @@ public partial class MainWindow : Window
 
         var mode = route switch
         {
-            0 => AudioRouter.RouteMode.SpeakerOnly,
-            1 => AudioRouter.RouteMode.SpeakerOnly,
-            2 => AudioRouter.RouteMode.MicOnly,
-            3 => AudioRouter.RouteMode.MicOnlySys,
+            0 => AudioRouter.RouteMode.SpeakerOnly,   // 系统音频 → 扬声器
+            1 => AudioRouter.RouteMode.Both,           // 系统音频 + 麦克风 → 扬声器（混音）
+            2 => AudioRouter.RouteMode.MicOnly,        // 麦克风 → 虚拟麦克风
+            3 => AudioRouter.RouteMode.MicOnlySys,     // 系统音频 → 虚拟麦克风
             _ => AudioRouter.RouteMode.SpeakerOnly,
         };
+
+        // 强制重启音频输出设备（解决初次连接时 WaveOutEvent 空跑后不出声的问题）
+        _engine.Router.Stop();
 
         if (!_engine.Router.SetMode(mode))
         {
@@ -174,5 +183,134 @@ public partial class MainWindow : Window
         Show();
         WindowState = WindowState.Normal;
         Activate();
+    }
+
+    // ── WiFi Direct P2P ──
+
+    private async void OnP2pClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (_p2pHelper != null)
+        {
+            // 已启动 → 停止
+            await _p2pHelper.StopAsync();
+            _p2pHelper.Dispose();
+            _p2pHelper = null;
+            _hs.ExpectedToken = null;
+            P2pButton.Content = "启动 P2P";
+            QrImage.IsVisible = false;
+            P2pDeviceLabel.IsVisible = false;
+            P2pProgressPanel.IsVisible = false;
+            P2pStatusText.Text = "";
+            P2pProgressRing.IsIndeterminate = true;
+            return;
+        }
+
+        // 创建 P2P 建链辅助器（Windows 做客户端，连接 Android GO）
+        _p2pHelper = new WifiDirectP2pHelper();
+        _p2pHelper.OnStatusChanged += msg =>
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                P2pProgressPanel.IsVisible = true;
+                P2pStatusText.Text = msg;
+            });
+        };
+
+        // QR 码立即显示（含 device name + token，手机扫码后创建 P2P Group）
+        var qrContent = QrCodeHelper.BuildQrPayload(_p2pHelper.DeviceName, _p2pHelper.Token);
+        QrImage.Source = QrCodeHelper.Generate(qrContent);
+        QrImage.IsVisible = true;
+        P2pDeviceLabel.Text = $"设备：{_p2pHelper.DeviceName}  请手机扫码";
+        P2pDeviceLabel.IsVisible = true;
+
+        // P2P 连接成功后：主动发 HELLO 到 Android GO
+        _p2pHelper.OnConnected += () =>
+        {
+            _ = Task.Run(() => SendHelloToAndroidGo());
+        };
+
+        // 设置 Token 校验
+        _hs.ExpectedToken = _p2pHelper.Token;
+        P2pButton.Content = "停止 P2P";
+
+        // 启动发现循环（异步，不阻塞 UI）
+        await _p2pHelper.StartAsync();
+    }
+
+    /// <summary>P2P 连接后主动向 Android GO 发 HELLO 握手</summary>
+    private async Task SendHelloToAndroidGo()
+    {
+        try
+        {
+            var goIp = _p2pHelper?.GoIp ?? "192.168.49.1";
+            var token = _p2pHelper?.Token ?? "";
+            Log.I("MainWindow", $"Sending HELLO to Android GO: {goIp}:12347");
+
+            using var client = new System.Net.Sockets.UdpClient();
+            client.Client.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Any, 0));
+
+            // 构建 HELLO 包（payload: 1B route + 8B token）
+            var protocol = new LanAudioBridge.Core.Adapters.PacketHeaderAdapter();
+            var tokenBytes = Encoding.ASCII.GetBytes(token);
+            var payload = new byte[9];
+            payload[0] = 0; // route mode 0
+            Array.Copy(tokenBytes, 0, payload, 1, Math.Min(8, tokenBytes.Length));
+
+            var packet = new Packet
+            {
+                Type = PacketType.Hello,
+                LinkType = 0x02,  // WIFI_DIRECT
+                Sequence = 0,
+                Payload = payload
+            };
+            var encoded = protocol.Encode(packet);
+
+            // 重发 3 次（P2P 链路 ARP 可能丢弃前几包）
+            for (int i = 0; i < 3; i++)
+            {
+                await client.SendAsync(encoded, new System.Net.IPEndPoint(System.Net.IPAddress.Parse(goIp), 12347));
+                Log.I("MainWindow", $"HELLO sent to {goIp}:12347 (attempt {i + 1}/3)");
+
+                // 等待 HELLO_ACK（2s 超时）
+                try
+                {
+                    using var cts = new CancellationTokenSource(2000);
+                    var result = await client.ReceiveAsync(cts.Token);
+                    var reply = protocol.Decode(result.Buffer);
+                    if (reply.HasValue && reply.Value.Type == PacketType.HelloAck)
+                    {
+                        // 从 HELLO_ACK payload 读取 Android 选择的路线
+                        int route = 0;
+                        if (reply.Value.Payload.Length >= 1)
+                            route = Math.Clamp((int)reply.Value.Payload[0], 0, 3);
+
+                        Log.I("MainWindow", $"HELLO_ACK received! P2P handshake OK, route={route}");
+
+                        // 设置 AudioRouter 模式（与 LAN 模式的 OnHandshakeRoute 相同逻辑）
+                        OnHandshakeRoute(route);
+
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                        {
+                            P2pStatusText.Text = $"P2P 握手成功 ✓ local={_p2pHelper?.LocalIp} go={goIp} route={route}";
+                            P2pProgressRing.IsIndeterminate = false;
+                            P2pProgressRing.Value = 100;
+                        });
+                        _stateManager.Update(ConnectionState.Connected);
+                        return;
+                    }
+                }
+                catch (OperationCanceledException) { /* timeout, retry */ }
+            }
+
+            Log.W("MainWindow", "P2P handshake failed: no HELLO_ACK after 3 attempts");
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                P2pStatusText.Text = "P2P 握手失败（手机未响应）";
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.E("MainWindow", $"SendHelloToAndroidGo error: {ex.Message}");
+        }
     }
 }

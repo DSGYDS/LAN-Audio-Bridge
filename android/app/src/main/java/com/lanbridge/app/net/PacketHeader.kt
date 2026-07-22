@@ -7,15 +7,16 @@ import java.nio.ByteOrder
  * PacketHeader — LAN Audio Bridge 通信协议通用包头
  *
  * ## 职责
- * 仅负责 14B 包头的编解码，不含任何业务逻辑。
+ * 仅负责 15B 包头的编解码，不含任何业务逻辑。
  * Sequence 的维护由发送方业务层负责。
  *
- * ## 格式（14 字节）
+ * ## 格式（15 字节，Version 0x02）
  * [0-3]   Magic:        0x4C414242
- * [4]     Version:      0x01
+ * [4]     Version:      0x02
  * [5]     Type:         包类型
- * [6-9]   Sequence:     uint32 BE
- * [10-13] PayloadLength: uint32 BE
+ * [6]     LinkType:     链路类型（0x00=Unknown, 0x01=WiFi LAN, 0x02=WiFi Direct, 0x03=BT, 0x04=USB）
+ * [7-10]  Sequence:     uint32 BE
+ * [11-14] PayloadLength: uint32 BE
  *
  * ## 设计约束
  * - 无状态（Stateless）：不保存 Sequence、Socket 或任何运行时状态
@@ -27,25 +28,26 @@ object PacketHeader {
     const val MAGIC: Int = 0x4C414242
 
     /** 当前协议版本 */
-    const val CURRENT_VERSION: Byte = 0x01
+    const val CURRENT_VERSION: Byte = 0x02
 
     /** 包头固定长度 */
-    const val HEADER_SIZE: Int = 14
+    const val HEADER_SIZE: Int = 15
 
     /**
      * 编码包头（推荐形式）
      *
      * Version 内部写死为 [CURRENT_VERSION]，业务层无需关心。
-     * 返回 byte[14]，调用方自行在末尾拼接 Payload。
+     * 返回 byte[15]，调用方自行在末尾拼接 Payload。
      */
-    fun encodeHeader(type: Byte, seq: Int, payloadLen: Int): ByteArray {
+    fun encodeHeader(type: Byte, linkType: Byte, seq: Int, payloadLen: Int): ByteArray {
         val buf = ByteBuffer.allocate(HEADER_SIZE)
         buf.order(ByteOrder.BIG_ENDIAN)
         buf.putInt(MAGIC)           // 0-3: Magic
         buf.put(CURRENT_VERSION)    // 4: Version
         buf.put(type)               // 5: Type
-        buf.putInt(seq)             // 6-9: Sequence (uint32)
-        buf.putInt(payloadLen)      // 10-13: PayloadLength
+        buf.put(linkType)           // 6: LinkType
+        buf.putInt(seq)             // 7-10: Sequence (uint32)
+        buf.putInt(payloadLen)      // 11-14: PayloadLength
         return buf.array()
     }
 
@@ -74,6 +76,7 @@ object PacketHeader {
         if (version != CURRENT_VERSION) return null
 
         val type = buf.get()
+        val linkType = buf.get()
         val seq = buf.getInt()
         val payloadLen = buf.getInt()
 
@@ -81,7 +84,7 @@ object PacketHeader {
         val actualPayloadLen = data.size - HEADER_SIZE
         if (payloadLen != actualPayloadLen) return null
 
-        return PacketHeaderInfo(type, seq, payloadLen)
+        return PacketHeaderInfo(type, linkType, seq, payloadLen)
     }
 }
 
@@ -90,6 +93,7 @@ object PacketHeader {
  */
 data class PacketHeaderInfo(
     val type: Byte,
+    val linkType: Byte,
     val seq: Int,
     val payloadLen: Int
 )

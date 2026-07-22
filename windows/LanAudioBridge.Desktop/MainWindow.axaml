@@ -24,6 +24,22 @@
       <TextBlock Text="手机端请连接同一 Wi-Fi，并选择扫描到的电脑，或手动填写上面的 IP。"
                  FontSize="12" Foreground="Gray" TextWrapping="Wrap" />
 
+      <!-- WiFi Direct P2P -->
+      <Border BorderBrush="{DynamicResource SystemAccentColor}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,6,0,0">
+        <StackPanel Spacing="6">
+          <Grid ColumnDefinitions="Auto,*">
+            <TextBlock Grid.Column="0" Text="WiFi Direct 直连" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" />
+            <Button Name="P2pButton" Grid.Column="1" Content="启动 P2P" HorizontalAlignment="Right" Click="OnP2pClick" />
+          </Grid>
+          <Image Name="QrImage" MaxWidth="200" MaxHeight="200" IsVisible="False" HorizontalAlignment="Center" />
+          <TextBlock Name="P2pDeviceLabel" Text="" FontSize="12" Foreground="Gray" IsVisible="False" HorizontalAlignment="Center" />
+          <StackPanel Name="P2pProgressPanel" IsVisible="False" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
+            <ProgressBar Name="P2pProgressRing" IsIndeterminate="True" Width="16" Height="16" />
+            <TextBlock Name="P2pStatusText" Text="" FontSize="12" VerticalAlignment="Center" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
       <!-- Volume -->
       <Grid ColumnDefinitions="Auto,*,Auto">
         <Label Grid.Column="0" Content="电脑播放音量：" FontWeight="SemiBold" VerticalAlignment="Center" />

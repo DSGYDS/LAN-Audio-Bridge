@@ -15,6 +15,7 @@ public sealed class PacketHeaderAdapter : IPacketProtocol
     {
         var header = PacketHeader.EncodeHeader(
             (byte)packet.Type,
+            packet.LinkType,
             packet.Sequence,
             packet.Payload.Length);
 
@@ -37,6 +38,7 @@ public sealed class PacketHeaderAdapter : IPacketProtocol
         return new Packet
         {
             Type = (PacketType)info.Value.Type,
+            LinkType = info.Value.LinkType,
             Sequence = unchecked((ushort)info.Value.Seq),
             Payload = payload
         };

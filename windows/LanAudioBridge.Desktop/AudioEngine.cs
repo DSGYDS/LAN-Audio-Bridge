@@ -53,8 +53,8 @@ public sealed class AudioEngine : IDisposable
     private long _lostFrames;
     private long _fecRecovered;
 
-    // ── Jitter Buffer（抵抚网络抖动） ──
-    private readonly JitterBuffer _jitterBuffer = new(capacity: 5, preFillCount: 3);
+    // ── Jitter Buffer（抵消网络抖动，P2P 链路抖动较大，需要更深缓冲） ──
+    private readonly JitterBuffer _jitterBuffer = new(capacity: 8, preFillCount: 5);
     private Timer? _playbackTimer;  // 20ms 定时拉取帧
 
     // ── 音频看门狗（断线检测） ──

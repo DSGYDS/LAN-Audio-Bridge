@@ -15,3 +15,15 @@ public enum PacketType : byte
     Audio     = 0x06,   // Android→Win: 音频帧, payload=纯 Opus
     Heartbeat = 0x07,   // 双向: 预留心跳, payload=无
 }
+
+/// <summary>
+/// LinkType — 四级链路类型标识（包头 [6] 字段）
+/// </summary>
+public static class LinkType
+{
+    public const byte Unknown   = 0x00;
+    public const byte WifiLan   = 0x01;
+    public const byte WifiDirect = 0x02;
+    public const byte Bluetooth = 0x03;
+    public const byte Usb       = 0x04;
+}

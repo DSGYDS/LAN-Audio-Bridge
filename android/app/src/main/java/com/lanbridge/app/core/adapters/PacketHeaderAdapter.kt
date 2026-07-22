@@ -14,6 +14,7 @@ class PacketHeaderAdapter : IPacketProtocol {
     override fun encode(packet: Packet): ByteArray {
         val header = PacketHeader.encodeHeader(
             packet.type.code,
+            packet.linkType,
             packet.sequence.toInt(),
             packet.payload.size
         )
@@ -30,6 +31,7 @@ class PacketHeaderAdapter : IPacketProtocol {
         )
         return Packet(
             type = PacketType.fromCode(info.type) ?: return null,
+            linkType = info.linkType,
             sequence = info.seq.toUShort(),
             payload = payload
         )
