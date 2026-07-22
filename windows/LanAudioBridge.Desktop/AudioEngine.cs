@@ -47,14 +47,31 @@ public sealed class AudioEngine : IDisposable
     private long _frameCount;
     private float _volume = 1.0f;
 
+    // ── 冷启动淡入（掩盖初始 HAL 冷启动卡顿） ──
+    private int _coldStartFrame;            // 当前冷启动帧计数
+    private const int ColdStartFadeFrames = 100; // 淡入时长：100 帧 ≈ 2 秒
+
+    // ── 诊断计数 ──
+    private long _pktRecvCount;      // 收到的 UDP 包总数
+    private long _audioPktCount;     // AUDIO 类型包数
+    private long _decodeOkCount;     // 解码成功数
+    private long _decodeFailCount;   // 解码失败数
+    private long _pullOkCount;       // JitterBuffer Pull 成功数
+    private long _pullNullCount;     // JitterBuffer Pull 空（underrun）数
+    private DateTime _diagLastLog = DateTime.UtcNow;
+
     // ── FEC 丢包补偿 ──
     private ushort _lastSeq;
     private bool _hasLastSeq;
     private long _lostFrames;
     private long _fecRecovered;
 
-    // ── Jitter Buffer（抵消网络抖动，P2P 链路抖动较大，需要更深缓冲） ──
-    private readonly JitterBuffer _jitterBuffer = new(capacity: 8, preFillCount: 5);
+    // ── PLC 丢包隐藏（underrun 时用 Opus 解码器生成 comfort noise） ──
+    private int _consecutivePlc;              // 连续 PLC 帧数
+    private const int MaxPlcFrames = 25;      // 最多连续 25 帧 PLC（500ms），超过后回退静音
+
+    // ── Jitter Buffer（抵消网络抖动，冷启动 HAL 帧突发需要更深预缓冲） ──
+    private readonly JitterBuffer _jitterBuffer = new(capacity: 24, preFillCount: 5);
     private Timer? _playbackTimer;  // 20ms 定时拉取帧
 
     // ── 音频看门狗（断线检测） ──
@@ -84,7 +101,9 @@ public sealed class AudioEngine : IDisposable
 
         _running = true;
         Reset();
-        _router.Start();
+        // 注意：不在此处调用 _router.Start()！
+        // 冷启动时若提前创建 WaveOutEvent 会“空跑”数秒，导致音频到达后播放一帧即停。
+        // 扬声器在握手 SetMode 时才创建，确保设备启动即有数据流入。
 
         // 启动音频看门狗（每 500ms 检测一次音频超时）
         _watchdogTimer = new Timer(_ => CheckWatchdog(), null, 500, 500);
@@ -149,6 +168,23 @@ public sealed class AudioEngine : IDisposable
         _jitterBuffer.Reset();
     }
 
+    /// <summary>
+    /// 重置会话状态（收到新 HELLO 时调用）。
+    /// Android 每次 HELLO 后会重启推流（seq 从 0 开始），
+    /// 必须重置 JitterBuffer 和 seq 追踪，否则新会话帧会被当作“迟到包”丢弃。
+    /// </summary>
+    public void ResetSession()
+    {
+        _jitterBuffer.Reset();
+        _hasLastSeq = false;
+        _lastSeq = 0;
+        _frameCount = 0;
+        _watchdogFired = false;
+        _coldStartFrame = 0;  // 重置淡入
+        _lastAudioTime = DateTime.UtcNow;  // 给新会话一个宽限期
+        Log.I("AudioEngine", "Session reset (new HELLO)");
+    }
+
     // ── 音频看门狗 ──
     // 每 500ms 由 _watchdogTimer 触发，检测连续 [AudioTimeoutMs]ms 未收到音频
     // 触发状态 → RECOVERING（不发起重连，等 Android 发 HELLO 恢复）
@@ -176,6 +212,8 @@ public sealed class AudioEngine : IDisposable
     {
         if (!_running) return;
 
+        Interlocked.Increment(ref _pktRecvCount);
+
         try
         {
             // ── 通过 IPacketProtocol 解码数据包 ──
@@ -184,6 +222,7 @@ public sealed class AudioEngine : IDisposable
 
             // 仅处理 AUDIO 类型包（握手包由 HandshakeServer 处理）
             if (packet.Value.Type != PacketType.Audio) return;
+            Interlocked.Increment(ref _audioPktCount);
 
             var opusData = packet.Value.Payload;
             ushort seq = packet.Value.Sequence;
@@ -213,6 +252,7 @@ public sealed class AudioEngine : IDisposable
             var pcm = DecodeAndProcess(opusData);
             if (pcm != null)
             {
+                Interlocked.Increment(ref _decodeOkCount);
                 // 更新最后音频时间（看门狗恢复计时）
                 _lastAudioTime = DateTime.UtcNow;
                 _watchdogFired = false;
@@ -221,9 +261,14 @@ public sealed class AudioEngine : IDisposable
                 _jitterBuffer.Push(seq, pcm);
                 if (Interlocked.Read(ref _frameCount) == 0)
                 {
+                    Log.I("AudioEngine", $"First decoded frame: seq={seq}, pcmLen={pcm.Length}");
                     OnFirstFrameDecoded?.Invoke();
                 }
                 Interlocked.Increment(ref _frameCount);
+            }
+            else
+            {
+                Interlocked.Increment(ref _decodeFailCount);
             }
         }
         catch (Exception ex)
@@ -253,6 +298,20 @@ public sealed class AudioEngine : IDisposable
         {
             return null; // FEC 恢复失败不影响正常流程
         }
+    }
+
+    /// <summary>Opus PLC（丢包隐藏）：用解码器内部状态生成 comfort noise，替代纯静音</summary>
+    private float[]? DecodePlc()
+    {
+        try
+        {
+            var pcm = new short[FrameSize];
+#pragma warning disable CS0618
+            int n = _decoder.Decode(null, 0, 0, pcm, 0, FrameSize, false);
+#pragma warning restore CS0618
+            return n > 0 ? ShortToFloat(pcm) : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>Opus 解码（decodeFEC=true 时用包内冗余数据恢复丢帧）</summary>
@@ -292,8 +351,44 @@ public sealed class AudioEngine : IDisposable
         var pcm = _jitterBuffer.Pull();
         if (pcm != null)
         {
+            Interlocked.Increment(ref _pullOkCount);
+            _consecutivePlc = 0;  // 成功拉取，重置 PLC 计数
+
+            // 冷启动淡入：前 2 秒音量从 0 线性渐变到 1，掩盖 HAL 冷启动初始卡顿
+            if (_coldStartFrame < ColdStartFadeFrames)
+            {
+                float gain = (float)(_coldStartFrame + 1) / ColdStartFadeFrames;
+                for (int i = 0; i < pcm.Length; i++)
+                    pcm[i] *= gain;
+                _coldStartFrame++;
+            }
+
             _router.OnAudioFrame(pcm);
         }
-        // pcm == null 表示 underrun，BufferedWaveProvider 会自动填充静音
+        else if (_jitterBuffer.IsPrefilled && _consecutivePlc < MaxPlcFrames)
+        {
+            // PLC：underrun 时用 Opus 解码器生成 comfort noise，听感优于纯静音
+            Interlocked.Increment(ref _pullNullCount);
+            _consecutivePlc++;
+            var plc = DecodePlc();
+            if (plc != null)
+                _router.OnAudioFrame(plc);
+        }
+        else
+        {
+            Interlocked.Increment(ref _pullNullCount);
+        }
+
+        // 每 5 秒输出一次诊断统计
+        if ((DateTime.UtcNow - _diagLastLog).TotalSeconds >= 5)
+        {
+            _diagLastLog = DateTime.UtcNow;
+            Log.I("AudioEngine",
+                $"[Diag] recv={Interlocked.Read(ref _pktRecvCount)} audio={Interlocked.Read(ref _audioPktCount)} " +
+                $"decOk={Interlocked.Read(ref _decodeOkCount)} decFail={Interlocked.Read(ref _decodeFailCount)} " +
+                $"pullOk={Interlocked.Read(ref _pullOkCount)} pullNull={Interlocked.Read(ref _pullNullCount)} " +
+                $"jbCount={_jitterBuffer.Count} prefilled={_jitterBuffer.IsPrefilled} " +
+                $"speakerReady={_router.IsSpeakerReady}");
+        }
     }
 }

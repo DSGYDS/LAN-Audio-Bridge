@@ -35,6 +35,10 @@ class AudioPipeline {
         const val MODE_MIC = 0
         const val MODE_SYSTEM = 1
         const val MODE_MIX = 2
+
+        // 看门狗参数
+        private const val WATCHDOG_NULL_THRESHOLD = 15   // 连续 15 次 null（≈300ms）触发重启
+        private const val WATCHDOG_MAX_RESTARTS = 5      // 最多重启次数
     }
 
     // ── 子模块（通过 AudioConfig 初始化） ──
@@ -117,12 +121,12 @@ class AudioPipeline {
             MODE_MIC -> {
                 if (!mic.prepare()) { streaming = false; return false }
                 mic.start()
-                Thread({ captureLoop { mic.readFrame() } }, "cap-mic")
+                Thread({ mic.warmup(); captureLoop({ mic.readFrame() }, { mic.restart() }) }, "cap-mic")
             }
             MODE_SYSTEM -> {
                 if (proj == null || !sys.prepare(proj, ctx)) { streaming = false; return false }
                 sys.start()
-                Thread({ captureLoop { sys.readFrame() } }, "cap-sys")
+                Thread({ sys.warmup(); captureLoop({ sys.readFrame() }, { sys.restart() }) }, "cap-sys")
             }
             MODE_MIX -> {
                 if (proj == null || !sys.prepare(proj, ctx)) { streaming = false; return false }
@@ -134,9 +138,12 @@ class AudioPipeline {
                 mic.start()
                 sys.start()
                 Thread({
+                    mic.warmup(); sys.warmup()  // HAL 预热
                     var seq = 0
                     var failCount = 0
                     var firstFrameNotified = false
+                    var watchdogCount = 0
+                    var restartAttempts = 0
                     while (streaming) {
                         if (stopping) { Thread.sleep(1); continue }
                         val a = mic.readFrame()
@@ -147,11 +154,22 @@ class AudioPipeline {
                             b != null -> b                                    // 只读到系统音频
                             else -> {
                                 failCount++
+                                watchdogCount++
                                 if (failCount > 10) { Thread.sleep(2); failCount = 0 }
+                                // 看门狗：两路同时无帧达阈值 → 重启采集器
+                                if (watchdogCount >= WATCHDOG_NULL_THRESHOLD && restartAttempts < WATCHDOG_MAX_RESTARTS) {
+                                    restartAttempts++
+                                    Log.w(TAG, "Mix watchdog: restarting capturers (attempt $restartAttempts)")
+                                    mic.restart()
+                                    sys.restart()
+                                    watchdogCount = 0
+                                }
                                 continue
                             }
                         }
                         failCount = 0
+                        watchdogCount = 0
+                        restartAttempts = 0  // 成功出帧后重置重启计数
                         frameAssembler.push(pcmPart) { pcm ->
                             val opus = enc.encodeFrame(pcm)
                             if (opus != null) {
@@ -176,32 +194,61 @@ class AudioPipeline {
 
     // ── 单源采集循环（MIC / SYSTEM 共用） ──
     // 循环读取 PCM → 拼帧 → Opus 编码 → UDP 发送
-    private fun captureLoop(reader: () -> ByteArray?) {
+    // 看门狗：连续无帧达阈值时自动重启采集器
+    private fun captureLoop(reader: () -> ByteArray?, restarter: () -> Boolean) {
         var seq = 0
         var failCount = 0
         var firstFrameNotified = false
+        var watchdogCount = 0
+        var restartAttempts = 0
+        var encodeNullCount = 0
+        val loopStart = System.currentTimeMillis()
         while (streaming) {
             if (stopping) { Thread.sleep(1); continue }
             val pcm = reader()
             if (pcm != null) {
                 failCount = 0
+                watchdogCount = 0
+                restartAttempts = 0  // 成功出帧后重置重启计数
                 frameAssembler.push(pcm) { frame ->
                     val opus = enc.encodeFrame(frame)
                     if (opus != null) {
                         sendOpusFrame(opus, seq)
                         if (!firstFrameNotified) {
                             firstFrameNotified = true
+                            Log.i(TAG, "First opus frame sent: seq=0, size=${opus.size}, elapsed=${System.currentTimeMillis() - loopStart}ms")
                             onFirstFrame?.invoke()
                         }
                         cb?.invoke(opus, seq)
                         seq++
+                        // 每 250 帧（≈5s）打印一次统计
+                        if (seq % 250 == 0) {
+                            Log.i(TAG, "captureLoop stats: sent=$seq, encodeNull=$encodeNullCount, elapsed=${System.currentTimeMillis() - loopStart}ms")
+                        }
+                    } else {
+                        encodeNullCount++
+                        if (encodeNullCount <= 3 || encodeNullCount % 100 == 0) {
+                            Log.w(TAG, "encodeFrame returned null (count=$encodeNullCount)")
+                        }
                     }
                 }
             } else {
                 failCount++
+                watchdogCount++
                 if (failCount > 10) { Thread.sleep(2); failCount = 0 }
+                // 看门狗：连续无帧达阈值 → 重启采集器
+                if (watchdogCount >= WATCHDOG_NULL_THRESHOLD && restartAttempts < WATCHDOG_MAX_RESTARTS) {
+                    restartAttempts++
+                    Log.w(TAG, "Watchdog: restarting capturer (attempt $restartAttempts)")
+                    if (restarter()) {
+                        watchdogCount = 0
+                    } else {
+                        Thread.sleep(50)  // 重启失败，等待后重试
+                    }
+                }
             }
         }
+        Log.i(TAG, "captureLoop exited: totalSent=$seq, encodeNull=$encodeNullCount")
     }
 
     /** 通过 ITransport 发送一个 Opus 帧（协议编码 + UDP 发送） */

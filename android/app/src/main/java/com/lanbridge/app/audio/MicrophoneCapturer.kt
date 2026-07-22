@@ -85,6 +85,18 @@ class MicrophoneCapturer {
         rec?.let { if (!running.get()) { it.startRecording(); running.set(true); hpf.reset() } }
     }
 
+    /** HAL 预热：丢弃前几帧，确保后续 read 稳定 20ms 返回（在采集线程中调用） */
+    fun warmup() {
+        val r = rec ?: return
+        if (!running.get()) return
+        val buf = ByteArray(FRAME_BYTES)
+        val deadline = System.currentTimeMillis() + 500
+        var frames = 0
+        while (frames < 3 && System.currentTimeMillis() < deadline) {
+            if (r.read(buf, 0, FRAME_BYTES) > 0) frames++
+        }
+    }
+
     fun readFrame(): ByteArray? {
         val r = rec ?: return null
         if (!running.get()) return null
@@ -114,6 +126,17 @@ class MicrophoneCapturer {
         val out = ByteArray(pcm.size)
         java.nio.ByteBuffer.wrap(out).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(s)
         return out
+    }
+
+    /** 看门狗触发后重建 AudioRecord（stop → release → prepare → start） */
+    fun restart(): Boolean {
+        stop()
+        rec?.release()
+        rec = null
+        hpf.reset()
+        if (!prepare()) return false
+        start()
+        return true
     }
 
     fun stop() {

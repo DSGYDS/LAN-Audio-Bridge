@@ -76,6 +76,11 @@ public partial class MainWindow : Window
         // 注意：不能在此处调用 Router.Stop()！
         // Stop() 置空 _speakerOut 后，SetMode(相同模式) 走短路分支返回 false → HELLO_NACK → 握手失败
         // SetMode 内部已包含完整 stop-start 逻辑，无需外部预 Stop
+
+        // 重置音频会话：Android 每次 HELLO 后会重启推流（seq 从 0 开始），
+        // 必须清空 JitterBuffer 和 seq 追踪，否则新会话帧被当作“迟到包”丢弃
+        _engine.ResetSession();
+
         if (!_engine.Router.SetMode(mode))
         {
             Log.W("MainWindow", $"Route {route} rejected (CABLE not available?)");

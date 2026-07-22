@@ -42,6 +42,8 @@ class AudioEncoder {
             setUseConstrainedVBR(_config.useConstrainedVbr)
             setSignalType(OpusSignal.OPUS_SIGNAL_MUSIC)
         }
+        // 预热：编码一帧静音，提前触发 Opus JNI 的 JIT 编译（否则首帧会阻塞 2+ 秒）
+        encodeFrame(ByteArray(FRAME_BYTES))
         true
     } catch (_: Exception) { false }
 

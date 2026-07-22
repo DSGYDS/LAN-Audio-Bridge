@@ -28,6 +28,18 @@ public sealed class JitterBuffer
     private bool _hasNextSeq;
     private bool _prefilled;              // 是否已完成预缓冲
 
+    // 诊断计数
+    private int _pushOkCount;
+    private int _pushLateCount;
+    private int _pushDupCount;
+    private int _pushOverflowCount;
+    private int _pullGapCount;
+    private int _consecutiveUnderrun;   // 连续 underrun 计数（容忍短暂帧到达延迟）
+    private const int UnderrunSkipThreshold = 5;  // 正常模式：连续 5 次 underrun（100ms）后跳过
+    private const int ColdStartUnderrunThreshold = 25; // 冷启动模式：连续 25 次（500ms）后跳过
+    private int _pullsSincePrefill;     // prefill 后已拉取次数（用于冷启动检测）
+    private const int ColdStartPulls = 100; // 前 100 次拉取（≈2s）视为冷启动阶段
+
     /// <summary>缓冲下溢次数（Pull 时无帧可取）</summary>
     public int UnderrunCount { get; private set; }
 
@@ -70,13 +82,22 @@ public sealed class JitterBuffer
                 }
                 else
                 {
+                    _pushLateCount++;
+                    if (_pushLateCount <= 5 || _pushLateCount % 200 == 0)
+                        LanAudioBridge.Core.Infrastructure.Log.W("JitterBuffer",
+                            $"Push DISCARD late: seq={seq}, nextPull={_nextPullSeq}, backward={backward}, count={_pushLateCount}");
                     return; // 真正的迟到包，丢弃
                 }
             }
 
             // 丢弃重复帧
             if (_buffer.ContainsKey(seq))
+            {
+                _pushDupCount++;
+                if (_pushDupCount <= 3)
+                    LanAudioBridge.Core.Infrastructure.Log.W("JitterBuffer", $"Push DISCARD dup: seq={seq}");
                 return;
+            }
 
             // 溢出保护：缓冲满时丢弃最老帧
             if (_buffer.Count >= _capacity)
@@ -90,6 +111,10 @@ public sealed class JitterBuffer
             }
 
             _buffer[seq] = pcm;
+            _pushOkCount++;
+            if (_pushOkCount <= 3 || _pushOkCount % 500 == 0)
+                LanAudioBridge.Core.Infrastructure.Log.I("JitterBuffer",
+                    $"Push ok: seq={seq}, bufCount={_buffer.Count}, prefilled={_prefilled}, nextPull={_nextPullSeq}");
 
             // 检查预缓冲是否完成
             if (!_prefilled && _buffer.Count >= _preFillCount)
@@ -120,6 +145,8 @@ public sealed class JitterBuffer
             {
                 _buffer.Remove(_nextPullSeq);
                 _nextPullSeq++;
+                _consecutiveUnderrun = 0;  // 成功拉取，重置计数
+                _pullsSincePrefill++;
                 return pcm;
             }
 
@@ -133,6 +160,10 @@ public sealed class JitterBuffer
 
                 // 如果空洞超过 capacity/2，说明 seq 跳变（可能重连），重置
                 int gap = (ushort)(oldest - _nextPullSeq);
+                _pullGapCount++;
+                if (_pullGapCount <= 5 || _pullGapCount % 200 == 0)
+                    LanAudioBridge.Core.Infrastructure.Log.W("JitterBuffer",
+                        $"Pull GAP: want={_nextPullSeq}, oldest={oldest}, gap={gap}, bufCount={_buffer.Count}, count={_pullGapCount}");
                 if (gap > _capacity)
                 {
                     _nextPullSeq = oldest;
@@ -147,7 +178,17 @@ public sealed class JitterBuffer
 
             // Underrun：无帧可取
             UnderrunCount++;
-            _nextPullSeq++; // 跳过这个 seq，下次尝试下一个
+            _consecutiveUnderrun++;
+            // 冷启动阶段用更高阈值（HAL 帧到达间隔可达 100-200ms），
+            // 避免 _nextPullSeq 飞速前进导致后续帧被当作“迟到包”丢弃。
+            int threshold = _pullsSincePrefill < ColdStartPulls
+                ? ColdStartUnderrunThreshold
+                : UnderrunSkipThreshold;
+            if (_consecutiveUnderrun >= threshold)
+            {
+                _nextPullSeq++;
+                _consecutiveUnderrun = 0;
+            }
             return null;
         }
     }
@@ -161,6 +202,8 @@ public sealed class JitterBuffer
             _prefilled = false;
             _hasNextSeq = false;
             _nextPullSeq = 0;
+            _consecutiveUnderrun = 0;
+            _pullsSincePrefill = 0;
             UnderrunCount = 0;
             OverflowCount = 0;
         }

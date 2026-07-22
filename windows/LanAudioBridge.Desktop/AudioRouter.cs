@@ -85,6 +85,7 @@ public sealed class AudioRouter : IDisposable
 
     public RouteMode Mode => _mode;
     public bool IsOutputToMic => _mode is RouteMode.MicOnly or RouteMode.Both or RouteMode.MicOnlySys;
+    public bool IsSpeakerReady { get { lock (_lock) return _speakerOut != null; } }
 
     // ── 生命周期 ──
 

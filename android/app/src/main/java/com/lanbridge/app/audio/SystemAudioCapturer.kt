@@ -38,6 +38,8 @@ class SystemAudioCapturer {
     private val _config: AudioConfig
     private val running = AtomicBoolean(false)
     private var audioManager: AudioManager? = null
+    private var cachedProjection: MediaProjection? = null  // 看门狗 restart 用
+    private var cachedCtx: Context? = null
 
     constructor(config: AudioConfig = AudioConfig.DEFAULT) {
         _config = config
@@ -56,6 +58,8 @@ class SystemAudioCapturer {
     fun prepare(projection: MediaProjection, ctx: Context? = null): Boolean {
         if (rec != null) return true
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        cachedProjection = projection
+        cachedCtx = ctx
 
         audioManager = ctx?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
@@ -105,6 +109,18 @@ class SystemAudioCapturer {
 
     fun start() { rec?.let { if (!running.get()) { it.startRecording(); running.set(true) } } }
 
+    /** HAL 预热：丢弃前几帧，确保后续 read 稳定 20ms 返回（在采集线程中调用） */
+    fun warmup() {
+        val r = rec ?: return
+        if (!running.get()) return
+        val buf = ByteArray(FRAME_BYTES)
+        val deadline = System.currentTimeMillis() + 500
+        var frames = 0
+        while (frames < 3 && System.currentTimeMillis() < deadline) {
+            if (r.read(buf, 0, FRAME_BYTES) > 0) frames++
+        }
+    }
+
     /** 读取一帧 PCM 数据，带音量缩放 */
     fun readFrame(): ByteArray? {
         val r = rec ?: return null
@@ -128,6 +144,39 @@ class SystemAudioCapturer {
         val out = ByteArray(pcm.size)
         ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(s)
         return out
+    }
+
+    /** 看门狗触发后重建 AudioRecord（保留静音轮询，不重新设置音量） */
+    fun restart(): Boolean {
+        val proj = cachedProjection ?: return false
+        stop()
+        rec?.release()
+        rec = null
+        // 重新构建 AudioRecord（复用已缓存的 projection，不重复静音）
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        try {
+            val config = AudioPlaybackCaptureConfiguration.Builder(proj)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .build()
+            val fmt = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build()
+            val buf = maxOf(
+                AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
+                FRAME_BYTES * _config.sysAudioBufferMultiplier)
+            rec = AudioRecord.Builder()
+                .setAudioPlaybackCaptureConfig(config).setAudioFormat(fmt).setBufferSizeInBytes(buf).build()
+            if (rec?.state != AudioRecord.STATE_INITIALIZED) return false
+            start()
+            Log.i(TAG, "restart ok")
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "restart failed: ${e.message}")
+            return false
+        }
     }
 
     fun stop() {
