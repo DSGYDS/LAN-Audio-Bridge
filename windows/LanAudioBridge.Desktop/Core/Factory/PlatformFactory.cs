@@ -4,15 +4,15 @@ using LanAudioBridge.Core.Adapters;
 namespace LanAudioBridge.Core.Factory;
 
 /// <summary>
-/// PlatformFactory — 平台工厂（第一批工厂方法）
+/// PlatformFactory — 平台工厂
 ///
-/// P3 实现三个核心工厂方法：
-///   CreateLogger     — 返回 ILogger 实现
-///   CreateTransport  — 按类型构造 ITransport
-///   CreateProtocol   — 返回 IPacketProtocol 实现
+/// 第一批（P3 已实现）：CreateLogger / CreateTransport / CreateProtocol
+/// 第二批（P3 新增）：CreateCapturer / CreateRenderer / CreateDiscovery / CreateNetworkMonitor
 /// </summary>
 public static class PlatformFactory
 {
+    // ── 第一批工厂方法（P3 已实现） ──
+
     /// <summary>创建平台日志实现（默认 ConsoleLogger）</summary>
     public static ILogger CreateLogger() => new ConsoleLogger();
 
@@ -33,5 +33,30 @@ public static class PlatformFactory
 
     /// <summary>创建协议编解码实例</summary>
     public static IPacketProtocol CreateProtocol() => new PacketHeaderAdapter();
+
+    // ── 第二批工厂方法（P3 新增） ──
+
+    /// <summary>
+    /// 创建音频采集器。
+    /// Windows 端为桩实现（Windows 是纯接收端，不采集音频）。
+    /// </summary>
+    public static IAudioCapturer CreateCapturer(CapturerType type = CapturerType.Microphone)
+        => new StubCapturer();
+
+    /// <summary>
+    /// 创建音频渲染器。
+    /// </summary>
+    /// <param name="useCable">true = CABLE Input（虚拟麦克风），false = 扬声器</param>
+    public static IAudioRenderer CreateRenderer(bool useCable = false)
+        => useCable ? new CableRenderer() : new SpeakerRenderer();
+
+    /// <summary>
+    /// 创建设备发现实例。
+    /// Windows 端为桩实现（Windows 是被发现方，不主动发现）。
+    /// </summary>
+    public static IDiscovery CreateDiscovery() => new WinDiscovery();
+
+    /// <summary>创建网络状态监听实例</summary>
+    public static INetworkMonitor CreateNetworkMonitor() => new WinNetworkMonitor();
 }
 
