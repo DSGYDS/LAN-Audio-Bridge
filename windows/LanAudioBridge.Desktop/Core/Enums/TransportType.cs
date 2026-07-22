@@ -5,9 +5,5 @@ namespace LanAudioBridge.Core;
 /// </summary>
 public enum TransportType
 {
-    Udp,
-    WifiDirect,
-    Usb,
-    Hotspot,
-    Relay
+    Udp
 }

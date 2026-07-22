@@ -94,7 +94,7 @@ class ConnectionStateManager {
             ConnectionState.CONNECTING -> to == ConnectionState.CONNECTED || to == ConnectionState.ERROR || to == ConnectionState.DISCONNECTED
             ConnectionState.CONNECTED -> to == ConnectionState.STREAMING || to == ConnectionState.DISCONNECTED || to == ConnectionState.ERROR
             ConnectionState.STREAMING -> to == ConnectionState.RECONNECTING || to == ConnectionState.DISCONNECTED || to == ConnectionState.ERROR
-            ConnectionState.RECONNECTING -> to == ConnectionState.CONNECTED || to == ConnectionState.SEARCHING || to == ConnectionState.DISCONNECTED || to == ConnectionState.ERROR
+            ConnectionState.RECONNECTING -> to == ConnectionState.CONNECTING || to == ConnectionState.CONNECTED || to == ConnectionState.SEARCHING || to == ConnectionState.DISCONNECTED || to == ConnectionState.ERROR
             ConnectionState.ERROR -> to == ConnectionState.DISCONNECTED || to == ConnectionState.IDLE
         }
     }

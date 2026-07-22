@@ -58,7 +58,7 @@ public static class PacketHeader
     /// 解码包头。
     ///
     /// 校验规则（任一失败返回 null）：
-    /// 1. 数据长度不足 14B
+    /// 1. 数据长度不足 15B
     /// 2. Magic 不匹配
     /// 3. Version 不匹配
     /// 4. PayloadLength 不等于 data.Length - HeaderSize

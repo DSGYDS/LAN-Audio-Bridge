@@ -5,7 +5,7 @@ import com.lanbridge.app.net.PacketType
 
 data class Packet(
     val type: PacketType,
-    val linkType: Byte = LinkType.UNKNOWN,
+    val linkType: Byte = LinkType.WIFI_LAN,
     val sequence: UShort,
     val payload: ByteArray
 )

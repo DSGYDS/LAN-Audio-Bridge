@@ -24,8 +24,7 @@ public static class PlatformFactory
         return type switch
         {
             TransportType.Udp => new UdpTransport(port, host, port),
-            TransportType.WifiDirect => new NullTransport(),
-            _ => new NullTransport(),
+            _ => throw new System.ArgumentOutOfRangeException(nameof(type), $"Unsupported transport: {type}")
         };
     }
 

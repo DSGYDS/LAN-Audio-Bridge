@@ -38,8 +38,4 @@ object AudioMixer {
         return r
     }
 
-    /**
-     * 单路静音（全部填 0）
-     */
-    fun silence(targetBytes: Int = 1920): ByteArray = ByteArray(targetBytes)
 }

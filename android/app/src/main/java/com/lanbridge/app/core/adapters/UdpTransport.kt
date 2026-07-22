@@ -51,6 +51,7 @@ class UdpTransport(
         _isConnected = false
         scope?.cancel()
         scope = null
+        if (!socket.isClosed) socket.close()  // 关闭 socket 释放端口
     }
 
     override suspend fun send(data: ByteArray) {
