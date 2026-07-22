@@ -1,36 +1,182 @@
+using System;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using LanAudioBridge.Core;
+using LanAudioBridge.Core.Factory;
+using LanAudioBridge.Core.Infrastructure;
+
 namespace LanAudioBridge.Desktop.Links;
 
 /// <summary>
-/// WiFi Direct 链路常量 — P2P 直连（Android 做 GO，Windows 做客户端）
+/// WifiDirectLink — WiFi Direct P2P 链路（完整实现）
 ///
-/// 角色反转：Android 做 Group Owner（自带 DHCP），Windows 做客户端
-/// 发现：Windows 轮询 DeviceInformation.FindAllAsync（WiFiDirectDevice）
-/// 握手：Windows → Android HELLO（携带 token），Android 回 HELLO_ACK
-/// 传输：UDP 单播（P2P 适配器 IP）
+/// 职责：P2P 发现/连接 + QR 码 + 主动向 Android GO 发 HELLO 握手。
+/// 与 LAN / 蓝牙 / USB 完全解耦。
 /// </summary>
-public static class WifiDirectLink
+public sealed class WifiDirectLink : ILink
 {
-    /// <summary>链路类型标识（包头 [6] 字段）</summary>
+    private const string Tag = "WifiDirectLink";
+
+    // ── 链路常量 ──
     public const byte LinkTypeId = 0x02;
-
-    /// <summary>音频数据端口（与 LAN 共用端口号，但走不同网络接口）</summary>
     public const int AudioPort = 12345;
-
-    /// <summary>握手/控制信令端口</summary>
     public const int HandshakePort = 12347;
-
-    /// <summary>Android GO 固定 IP</summary>
     public const string GoIp = "192.168.49.1";
-
-    /// <summary>P2P 设备发现轮询间隔（ms）</summary>
     public const int DiscoverIntervalMs = 3000;
-
-    /// <summary>P2P 设备发现超时（ms）</summary>
     public const int DiscoverTimeoutMs = 120_000;
-
-    /// <summary>P2P 适配器 IP 轮询间隔（ms）</summary>
     public const int IpPollIntervalMs = 500;
-
-    /// <summary>P2P 适配器 IP 轮询最大次数</summary>
     public const int IpPollMaxRetries = 30;
+
+    // ── 核心模块 ──
+    private WifiDirectP2pHelper? _p2pHelper;
+    private readonly HandshakeServer _hs;
+    private readonly ConnectionStateManager _stateManager;
+    private readonly Func<int, bool> _onHandshakeRoute;
+
+    // ── 事件（LinkManager / UI 订阅） ──
+    public Action<string>? OnP2pStatusChanged;
+    public Action<string?, string?>? OnQrChanged;
+    public Action<bool>? OnP2pProgressVisible;
+    public Action<bool, double>? OnP2pProgress;
+    public Action<bool>? OnP2pActiveChanged;
+
+    public bool IsActive => _p2pHelper != null;
+
+    public WifiDirectLink(
+        HandshakeServer hs,
+        ConnectionStateManager stateManager,
+        Func<int, bool> onHandshakeRoute)
+    {
+        _hs = hs;
+        _stateManager = stateManager;
+        _onHandshakeRoute = onHandshakeRoute;
+    }
+
+    // ── ILink 实现 ──
+
+    public async Task StartAsync()
+    {
+        if (_p2pHelper != null) return;
+
+        _p2pHelper = new WifiDirectP2pHelper();
+        _p2pHelper.OnStatusChanged += msg =>
+        {
+            OnP2pProgressVisible?.Invoke(true);
+            OnP2pStatusChanged?.Invoke(msg);
+        };
+
+        var qrContent = QrCodeHelper.BuildQrPayload(_p2pHelper.DeviceName, _p2pHelper.Token);
+        OnQrChanged?.Invoke(qrContent, _p2pHelper.DeviceName);
+
+        _p2pHelper.OnConnected += () => _ = Task.Run(() => SendHelloToAndroidGo());
+
+        _hs.ExpectedToken = _p2pHelper.Token;
+        OnP2pActiveChanged?.Invoke(true);
+
+        await _p2pHelper.StartAsync();
+    }
+
+    public async Task StopAsync()
+    {
+        if (_p2pHelper == null) return;
+
+        await _p2pHelper.StopAsync();
+        _p2pHelper.Dispose();
+        _p2pHelper = null;
+        _hs.ExpectedToken = null;
+
+        OnP2pActiveChanged?.Invoke(false);
+        OnQrChanged?.Invoke(null, null);
+        OnP2pProgressVisible?.Invoke(false);
+        OnP2pStatusChanged?.Invoke("");
+        OnP2pProgress?.Invoke(true, 0);
+    }
+
+    // ── P2P 握手（主动向 Android GO 发 HELLO） ──
+
+    private async Task SendHelloToAndroidGo()
+    {
+        ITransport? transport = null;
+        try
+        {
+            var goIp = _p2pHelper?.GoIp ?? GoIp;
+            var token = _p2pHelper?.Token ?? "";
+            Log.I(Tag, $"Sending HELLO to Android GO: {goIp}:{HandshakePort}");
+
+            transport = PlatformFactory.CreateTransport(TransportType.Udp, goIp, HandshakePort);
+            var protocol = PlatformFactory.CreateProtocol();
+            await transport.ConnectAsync();
+
+            var tokenBytes = Encoding.ASCII.GetBytes(token);
+            var payload = new byte[9];
+            payload[0] = 0;
+            Array.Copy(tokenBytes, 0, payload, 1, Math.Min(8, tokenBytes.Length));
+
+            var packet = new Packet
+            {
+                Type = PacketType.Hello,
+                LinkType = LinkTypeId,
+                Sequence = 0,
+                Payload = payload
+            };
+            var encoded = protocol.Encode(packet);
+
+            for (int i = 0; i < 3; i++)
+            {
+                await transport.SendAsync(encoded);
+                Log.I(Tag, $"HELLO sent to {goIp}:{HandshakePort} (attempt {i + 1}/3)");
+
+                try
+                {
+                    var reply = await WaitForPacketAsync(transport, 2000);
+                    if (reply != null)
+                    {
+                        var decoded = protocol.Decode(reply.Value.Span);
+                        if (decoded.HasValue && decoded.Value.Type == PacketType.HelloAck)
+                        {
+                            int route = 0;
+                            if (decoded.Value.Payload.Length >= 1)
+                                route = Math.Clamp((int)decoded.Value.Payload[0], 0, 3);
+
+                            Log.I(Tag, $"HELLO_ACK received! P2P handshake OK, route={route}");
+                            _onHandshakeRoute(route);
+
+                            OnP2pStatusChanged?.Invoke($"P2P 握手成功 ✓ local={_p2pHelper?.LocalIp} go={goIp} route={route}");
+                            OnP2pProgress?.Invoke(false, 100);
+                            _stateManager.Update(ConnectionState.Connected);
+                            return;
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { /* timeout, retry */ }
+            }
+
+            Log.W(Tag, "P2P handshake failed: no HELLO_ACK after 3 attempts");
+            OnP2pStatusChanged?.Invoke("P2P 握手失败（手机未响应）");
+        }
+        catch (Exception ex)
+        {
+            Log.E(Tag, $"SendHelloToAndroidGo error: {ex.Message}");
+        }
+        finally
+        {
+            if (transport != null) await transport.DisconnectAsync();
+        }
+    }
+
+    private static async Task<ReadOnlyMemory<byte>?> WaitForPacketAsync(ITransport transport, int timeoutMs)
+    {
+        var tcs = new TaskCompletionSource<ReadOnlyMemory<byte>>();
+        using var cts = new CancellationTokenSource(timeoutMs);
+        using var reg = cts.Token.Register(() => tcs.TrySetCanceled());
+        transport.PacketReceived += data => tcs.TrySetResult(data);
+        try { return await tcs.Task; }
+        catch (OperationCanceledException) { return null; }
+    }
+
+    public void Dispose()
+    {
+        _p2pHelper?.Dispose();
+    }
 }
