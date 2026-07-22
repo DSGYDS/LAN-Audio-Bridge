@@ -19,11 +19,14 @@ public sealed class AudioEngine : IDisposable
     public const int Channels = 1;
     public int FrameSize => _config.FrameSize;
 
-    /// <summary>构造 AudioEngine，接收 AudioConfig 参数和 ITransport 实例</summary>
-    public AudioEngine(ITransport? transport = null, AudioConfig? config = null)
+    /// <summary>构造 AudioEngine，接收 AudioConfig 参数、ITransport 实例和两个 IAudioRenderer</summary>
+    public AudioEngine(ITransport? transport = null, IAudioRenderer? speaker = null, IAudioRenderer? cable = null, AudioConfig? config = null)
     {
         _config = config ?? AudioConfig.Default;
-        _router = new AudioRouter(_config);
+        _router = new AudioRouter(
+            speaker ?? new LanAudioBridge.Core.Adapters.SpeakerRenderer(),
+            cable ?? new LanAudioBridge.Core.Adapters.CableRenderer(),
+            _config);
         _transport = transport;
     }
 

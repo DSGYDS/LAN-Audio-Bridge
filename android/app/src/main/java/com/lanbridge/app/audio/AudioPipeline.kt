@@ -2,10 +2,13 @@ package com.lanbridge.app.audio
 
 import android.content.Context
 import android.media.projection.MediaProjection
+import com.lanbridge.app.core.adapters.MicCapturerAdapter
+import com.lanbridge.app.core.adapters.SystemAudioCapturerAdapter
 import com.lanbridge.app.core.adapters.UdpTransport
 import com.lanbridge.app.core.enums.TransportType
 import com.lanbridge.app.core.factory.PlatformFactory
 import com.lanbridge.app.core.infrastructure.Log
+import com.lanbridge.app.core.interfaces.IAudioCapturer
 import com.lanbridge.app.core.interfaces.Packet
 import com.lanbridge.app.net.LinkType
 import com.lanbridge.app.net.PacketType
@@ -42,17 +45,17 @@ class AudioPipeline {
         private const val WATCHDOG_MAX_RESTARTS = 5      // 最多重启次数
     }
 
-    // ── 子模块（通过 AudioConfig 初始化） ──
-    private val mic: MicrophoneCapturer
-    private val sys: SystemAudioCapturer
+    // ── 子模块（通过 IAudioCapturer 接口） ──
+    private val config: AudioConfig
+    private var micCapturer: IAudioCapturer? = null   // 麦克风采集（IAudioCapturer）
+    private var sysCapturer: IAudioCapturer? = null   // 系统音频采集（IAudioCapturer）
     private val enc: AudioEncoder
     private var transport: UdpTransport? = null    // ITransport 实现（UDP 发送）
     private val protocol = PlatformFactory.createProtocol()  // 协议编解码
 
     /** 构造 AudioPipeline，接收 AudioConfig 参数 */
     constructor(config: AudioConfig = AudioConfig.DEFAULT) {
-        mic = MicrophoneCapturer(config)
-        sys = SystemAudioCapturer(config)
+        this.config = config
         enc = AudioEncoder(config)
     }
 
@@ -125,24 +128,34 @@ class AudioPipeline {
         frameAssembler.reset()
         thread = when (m) {
             MODE_MIC -> {
-                if (!mic.prepare()) { streaming = false; return false }
+                val mic = MicCapturerAdapter()
+                if (!mic.prepare(config)) { streaming = false; return false }
                 mic.start()
-                Thread({ mic.warmup(); captureLoop({ mic.readFrame() }, { mic.restart() }) }, "cap-mic")
+                micCapturer = mic
+                Thread({ mic.warmup(); captureLoop(mic) }, "cap-mic")
             }
             MODE_SYSTEM -> {
-                if (proj == null || !sys.prepare(proj, ctx)) { streaming = false; return false }
+                if (proj == null) { streaming = false; return false }
+                val sys = SystemAudioCapturerAdapter(proj, ctx)
+                if (!sys.prepare(config)) { streaming = false; return false }
                 sys.start()
-                Thread({ sys.warmup(); captureLoop({ sys.readFrame() }, { sys.restart() }) }, "cap-sys")
+                sysCapturer = sys
+                Thread({ sys.warmup(); captureLoop(sys) }, "cap-sys")
             }
             MODE_MIX -> {
-                if (proj == null || !sys.prepare(proj, ctx)) { streaming = false; return false }
-                if (!mic.prepare()) {
+                if (proj == null) { streaming = false; return false }
+                val sys = SystemAudioCapturerAdapter(proj, ctx)
+                val mic = MicCapturerAdapter()
+                if (!sys.prepare(config)) { streaming = false; return false }
+                if (!mic.prepare(config)) {
                     sys.release()
                     streaming = false
                     return false
                 }
                 mic.start()
                 sys.start()
+                micCapturer = mic
+                sysCapturer = sys
                 Thread({
                     mic.warmup(); sys.warmup()  // HAL 预热
                     var seq = 0
@@ -150,19 +163,23 @@ class AudioPipeline {
                     var firstFrameNotified = false
                     var watchdogCount = 0
                     var restartAttempts = 0
+                    val bufA = ByteArray(FRAME_BYTES)
+                    val bufB = ByteArray(FRAME_BYTES)
                     while (streaming) {
                         if (stopping) { Thread.sleep(1); continue }
-                        val a = mic.readFrame()
-                        val b = sys.readFrame()
+                        val nA = mic.readFrame(bufA, 0, FRAME_BYTES)
+                        val nB = sys.readFrame(bufB, 0, FRAME_BYTES)
                         val pcmPart = when {
-                            a != null && b != null -> AudioMixer.mix(a, b)    // 两路都读到 → 混音
-                            a != null -> a                                    // 只读到麦克风
-                            b != null -> b                                    // 只读到系统音频
+                            nA > 0 && nB > 0 -> AudioMixer.mix(
+                                if (nA == FRAME_BYTES) bufA else bufA.copyOf(nA),
+                                if (nB == FRAME_BYTES) bufB else bufB.copyOf(nB)
+                            )
+                            nA > 0 -> if (nA == FRAME_BYTES) bufA else bufA.copyOf(nA)
+                            nB > 0 -> if (nB == FRAME_BYTES) bufB else bufB.copyOf(nB)
                             else -> {
                                 failCount++
                                 watchdogCount++
                                 if (failCount > 10) { Thread.sleep(2); failCount = 0 }
-                                // 看门狗：两路同时无帧达阈值 → 重启采集器
                                 if (watchdogCount >= WATCHDOG_NULL_THRESHOLD && restartAttempts < WATCHDOG_MAX_RESTARTS) {
                                     restartAttempts++
                                     Log.w(TAG, "Mix watchdog: restarting capturers (attempt $restartAttempts)")
@@ -175,7 +192,7 @@ class AudioPipeline {
                         }
                         failCount = 0
                         watchdogCount = 0
-                        restartAttempts = 0  // 成功出帧后重置重启计数
+                        restartAttempts = 0
                         frameAssembler.push(pcmPart) { pcm ->
                             val opus = enc.encodeFrame(pcm)
                             if (opus != null) {
@@ -199,9 +216,9 @@ class AudioPipeline {
     }
 
     // ── 单源采集循环（MIC / SYSTEM 共用） ──
-    // 循环读取 PCM → 拼帧 → Opus 编码 → UDP 发送
+    // 通过 IAudioCapturer 接口读取 PCM → 拼帧 → Opus 编码 → UDP 发送
     // 看门狗：连续无帧达阈值时自动重启采集器
-    private fun captureLoop(reader: () -> ByteArray?, restarter: () -> Boolean) {
+    private fun captureLoop(capturer: IAudioCapturer) {
         var seq = 0
         var failCount = 0
         var firstFrameNotified = false
@@ -209,13 +226,15 @@ class AudioPipeline {
         var restartAttempts = 0
         var encodeNullCount = 0
         val loopStart = System.currentTimeMillis()
+        val buf = ByteArray(FRAME_BYTES)
         while (streaming) {
             if (stopping) { Thread.sleep(1); continue }
-            val pcm = reader()
-            if (pcm != null) {
+            val n = capturer.readFrame(buf, 0, FRAME_BYTES)
+            if (n > 0) {
                 failCount = 0
                 watchdogCount = 0
-                restartAttempts = 0  // 成功出帧后重置重启计数
+                restartAttempts = 0
+                val pcm = if (n == FRAME_BYTES) buf else buf.copyOf(n)
                 frameAssembler.push(pcm) { frame ->
                     val opus = enc.encodeFrame(frame)
                     if (opus != null) {
@@ -227,7 +246,6 @@ class AudioPipeline {
                         }
                         cb?.invoke(opus, seq)
                         seq++
-                        // 每 250 帧（≈5s）打印一次统计
                         if (seq % 250 == 0) {
                             Log.i(TAG, "captureLoop stats: sent=$seq, encodeNull=$encodeNullCount, elapsed=${System.currentTimeMillis() - loopStart}ms")
                         }
@@ -242,14 +260,13 @@ class AudioPipeline {
                 failCount++
                 watchdogCount++
                 if (failCount > 10) { Thread.sleep(2); failCount = 0 }
-                // 看门狗：连续无帧达阈值 → 重启采集器
                 if (watchdogCount >= WATCHDOG_NULL_THRESHOLD && restartAttempts < WATCHDOG_MAX_RESTARTS) {
                     restartAttempts++
                     Log.w(TAG, "Watchdog: restarting capturer (attempt $restartAttempts)")
-                    if (restarter()) {
+                    if (capturer.restart()) {
                         watchdogCount = 0
                     } else {
-                        Thread.sleep(50)  // 重启失败，等待后重试
+                        Thread.sleep(50)
                     }
                 }
             }
@@ -272,13 +289,14 @@ class AudioPipeline {
         thread?.join(500)
         thread = null
         streaming = true   // 重置以便 switchMode 继续使用
-        mic.stop()
-        if (releaseSystemAudio) sys.release() else sys.stop()
+        micCapturer?.stop()
+        if (releaseSystemAudio) { sysCapturer?.release(); sysCapturer = null }
+        else sysCapturer?.stop()
     }
 
-    // ── 音量控制（暴露到底层采集器） ──
-    fun setSysVolume(v: Float) { sys.volume = v.coerceIn(0f, 1f) }
-    fun setMicVolume(v: Float) { mic.volume = v.coerceIn(0f, 1f) }
+    // ── 音量控制（通过适配器透传） ──
+    fun setSysVolume(v: Float) { (sysCapturer as? SystemAudioCapturerAdapter)?.volume = v.coerceIn(0f, 1f) }
+    fun setMicVolume(v: Float) { (micCapturer as? MicCapturerAdapter)?.volume = v.coerceIn(0f, 1f) }
 
     fun isStreaming() = streaming
     fun getMode() = mode
@@ -290,8 +308,8 @@ class AudioPipeline {
         thread?.join(500)
         thread = null
         releaseTransport()
-        mic.stop(); mic.release()
-        sys.stop(); sys.release()
+        micCapturer?.stop(); micCapturer?.release(); micCapturer = null
+        sysCapturer?.stop(); sysCapturer?.release(); sysCapturer = null
         enc.release()
         Log.i(TAG, "stopped")
     }

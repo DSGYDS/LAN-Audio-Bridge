@@ -35,11 +35,13 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // 通过 PlatformFactory 创建传输层实例
+        // 通过 PlatformFactory 创建传输层和渲染器实例
         var audioTransport = PlatformFactory.CreateTransport(TransportType.Udp, null, 12345);
         var hsTransport = PlatformFactory.CreateTransport(TransportType.Udp, null, 12347);
+        var speakerRenderer = PlatformFactory.CreateRenderer(useCable: false);
+        var cableRenderer = PlatformFactory.CreateRenderer(useCable: true);
 
-        _engine = new AudioEngine(audioTransport);
+        _engine = new AudioEngine(audioTransport, speakerRenderer, cableRenderer);
         _hs = new HandshakeServer(hsTransport, OnHandshakeRoute);
         Loaded += OnLoaded;
 

@@ -106,6 +106,7 @@ fun MainScreen() {
             context = act,
             stateManager = stateManager,
             pipeline = pipe,
+            networkMonitor = com.lanbridge.app.core.factory.PlatformFactory.createNetworkMonitor(act),
             onRecover = onRecover@{ host, mode ->
                 val capMode = routeToCapture(mode)
                 val handshakeOk = HandshakeManager.handshake(host, mode)

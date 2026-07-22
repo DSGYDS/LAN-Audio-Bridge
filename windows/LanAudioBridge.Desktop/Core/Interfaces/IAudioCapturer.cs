@@ -29,6 +29,12 @@ public interface IAudioCapturer
     /// <summary>释放所有资源</summary>
     void Release();
 
+    /// <summary>HAL 预热（丢弃前几帧，消除冷启动抖动）</summary>
+    void Warmup() { }
+
+    /// <summary>看门狗触发时重建采集器（默认返回 false 表示不支持）</summary>
+    bool Restart() => false;
+
     /// <summary>采集源类型</summary>
     CapturerType SourceType { get; }
 }

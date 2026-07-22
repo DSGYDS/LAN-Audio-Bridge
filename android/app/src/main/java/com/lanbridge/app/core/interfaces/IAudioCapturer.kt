@@ -29,6 +29,12 @@ interface IAudioCapturer {
     /** 释放所有资源 */
     fun release()
 
+    /** HAL 预热（丢弃前几帧，消除冷启动抖动） */
+    fun warmup() {}
+
+    /** 看门狗触发时重建采集器（默认返回 false 表示不支持） */
+    fun restart(): Boolean = false
+
     /** 采集源类型 */
     val sourceType: CapturerType
 }

@@ -52,12 +52,12 @@ class SystemAudioCapturerAdapter(
     // ── 透传方法（供应用层使用，不属于接口） ──
 
     /** HAL 预热（丢弃前几帧） */
-    fun warmup() {
+    override fun warmup() {
         capturer?.warmup()
     }
 
     /** 看门狗触发时重建 AudioRecord */
-    fun restart(): Boolean {
+    override fun restart(): Boolean {
         return capturer?.restart() ?: false
     }
 

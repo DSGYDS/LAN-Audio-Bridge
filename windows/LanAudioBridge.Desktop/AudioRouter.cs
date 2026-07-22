@@ -1,14 +1,15 @@
 using System;
 using System.Buffers;
-using System.Linq;
-using NAudio.CoreAudioApi;
-using NAudio.Wave;
+using LanAudioBridge.Core;
 using LanAudioBridge.Core.Infrastructure;
 
 namespace LanAudioBridge.Desktop;
 
 /// <summary>
 /// 音频路由 — 将解码后的 PCM 分发到扬声器 / 虚拟麦克风。
+///
+/// P5 重构：不再直接管理 NAudio 设备，改为持有两个 IAudioRenderer 实例。
+/// 路由逻辑（模式切换、淡入、增益）保留在此类。
 ///
 /// 模式映射：
 ///   SpeakerOnly (模式1): 系统音频 → 扬声器
@@ -28,55 +29,27 @@ public sealed class AudioRouter : IDisposable
         MicOnlySys,
     }
 
-    // ── 音频参数（已集中到 AudioConfig） ──
+    // ── 音频参数 ──
     private readonly AudioConfig _config;
-    private static readonly WaveFormat WaveFormat =
-        WaveFormat.CreateIeeeFloatWaveFormat(48000, 1);
     private const int FadeMs = 50;                   // 淡入时长（ms），防切模式时的爆音
     private const int FadeSamplesTotal = 48000 * FadeMs / 1000; // 2400 采样点
-    private const float SpeakerGain = 1.0f;           // 扬声器增益（已从 1.8 降至 1.0 消除削波）
+    private const float SpeakerGain = 1.0f;           // 扬声器增益
 
-    // 复用枚举器，避免频繁创建 COM 对象
-    private static readonly MMDeviceEnumerator DeviceEnumerator = new();
-
-    // ── 音频输出 ──
-    private IWavePlayer? _speakerOut;                 // 扬声器（WaveOutEvent）
-    private BufferedWaveProvider? _speakerBuf;
-    private IWavePlayer? _micOut;                     // 虚拟麦克风 CABLE Input（WasapiOut）
-    private BufferedWaveProvider? _micBuf;
+    // ── 渲染器（通过构造函数注入，由 PlatformFactory 创建） ──
+    private readonly IAudioRenderer _speaker;
+    private readonly IAudioRenderer _cable;
 
     // ── 运行时状态 ──
     private RouteMode _mode = RouteMode.SpeakerOnly;
-    private readonly object _lock = new();            // 模式切换用锁
+    private readonly object _lock = new();
     private bool _disposed;
-    private int _fadeSamplePos;                       // 淡入累计位置（跨帧）
+    private int _fadeSamplePos;
 
     // 复用增益缓冲区，减少 GC
     private float[]? _gainScratch;
 
-    // 复用字节池，减少 GC（每帧 ~3840 字节）
+    // 复用字节池，减少 GC（float[] → byte[] 转换用）
     private static readonly ArrayPool<byte> BytePool = ArrayPool<byte>.Shared;
-
-    // ── 缓冲水位监控（用于延迟调优调试） ──
-
-    /// <summary>扬声器缓冲水位统计快照</summary>
-    public sealed class BufferStats
-    {
-        public double CurrentMs { get; set; }
-        public double MinMs { get; set; }
-        public double MaxMs { get; set; }
-        public double AvgMs { get; set; }
-        public int SampleCount { get; set; }
-    }
-
-    private BufferStats _speakerStats = new();
-    private double _prevBufMs;
-    private int _monitorFrameCount;
-
-    private const int MonitorInterval = 50; // 每 50 帧（≈1s）更新一次统计
-
-    /// <summary>获取当前扬声器缓冲水位统计，用于延迟监控</summary>
-    public BufferStats SpeakerBufferStats => _speakerStats;
 
     /// <summary>麦克风输出状态变化时触发</summary>
     public Action<bool>? OnMicOutputChanged;
@@ -85,13 +58,20 @@ public sealed class AudioRouter : IDisposable
 
     public RouteMode Mode => _mode;
     public bool IsOutputToMic => _mode is RouteMode.MicOnly or RouteMode.Both or RouteMode.MicOnlySys;
-    public bool IsSpeakerReady { get { lock (_lock) return _speakerOut != null; } }
+    public bool IsSpeakerReady { get { lock (_lock) return _speaker.IsReady; } }
 
     // ── 生命周期 ──
 
-    /// <summary>构造 AudioRouter，接收 AudioConfig 参数</summary>
-    public AudioRouter(AudioConfig? config = null)
+    /// <summary>
+    /// 构造 AudioRouter，接收两个 IAudioRenderer 实例（由 PlatformFactory 创建）。
+    /// </summary>
+    /// <param name="speaker">扬声器渲染器</param>
+    /// <param name="cable">CABLE Input 虚拟麦克风渲染器</param>
+    /// <param name="config">音频配置</param>
+    public AudioRouter(IAudioRenderer speaker, IAudioRenderer cable, AudioConfig? config = null)
     {
+        _speaker = speaker;
+        _cable = cable;
         _config = config ?? AudioConfig.Default;
     }
 
@@ -100,7 +80,7 @@ public sealed class AudioRouter : IDisposable
     {
         lock (_lock)
         {
-            if (_speakerOut != null) return;
+            if (_speaker.IsReady) return;
             StartSpeaker();
         }
     }
@@ -114,39 +94,28 @@ public sealed class AudioRouter : IDisposable
         lock (_lock)
         {
             if (_disposed) return false;
-            if (_mode == newMode && OutputsReady(newMode)) return true; // 同模式且设备就绪，无需操作
-            // 同模式但设备未就绪（如被外部 Stop 过）→ 继续执行完整 stop-start 重启流程
-
-            // 切到虚拟麦克风模式前先确认 CABLE 设备存在
-            if (newMode is RouteMode.MicOnly or RouteMode.MicOnlySys or RouteMode.Both)
-            {
-                if (FindCableDevice() == null)
-                {
-                    OnError?.Invoke("VB-Audio Virtual Cable 未安装，请在 https://vb-audio.com/Cable/ 下载安装");
-                    return false;
-                }
-            }
+            if (_mode == newMode && OutputsReady(newMode)) return true;
 
             var oldMode = _mode;
             bool wasMic = IsOutputToMic;
 
             // stop-start：先停全部，再启需要的
-            StopSpeaker();
-            StopMic();
+            _speaker.Stop();
+            _cable.Stop();
 
             bool started = newMode switch
             {
                 RouteMode.SpeakerOnly => EnsureSpeaker(),
-                RouteMode.MicOnly => EnsureMic(),
-                RouteMode.Both => EnsureSpeaker() && EnsureMic(),
-                RouteMode.MicOnlySys => EnsureMic(),
+                RouteMode.MicOnly => EnsureCable(),
+                RouteMode.Both => EnsureSpeaker() && EnsureCable(),
+                RouteMode.MicOnlySys => EnsureCable(),
                 _ => false,
             };
 
             if (!started)
             {
-                StopSpeaker();
-                StopMic();
+                _speaker.Stop();
+                _cable.Stop();
                 _mode = oldMode;
                 RestoreMode(oldMode);
                 return false;
@@ -172,7 +141,6 @@ public sealed class AudioRouter : IDisposable
         bool toSpeaker;
         bool toMic;
 
-        // 只锁模式判断，不做计算（减少锁竞争）
         lock (_lock)
         {
             if (_disposed) return;
@@ -182,7 +150,6 @@ public sealed class AudioRouter : IDisposable
         }
 
         // ── 淡入处理 ──
-        // 切模式后第一个 50ms（2400 采样点）渐进淡入，防爆音
         var processed = pcm;
         int fadePos;
         lock (_lock) { fadePos = _fadeSamplePos; }
@@ -196,65 +163,14 @@ public sealed class AudioRouter : IDisposable
 
         if (toSpeaker)
         {
-            var gained = ApplyGain(processed);   // 扬声器增益
-            WriteToBuffer(_speakerBuf, gained);
+            var gained = ApplyGain(processed);
+            FeedRenderer(_speaker, gained);
         }
 
         if (toMic)
         {
-            WriteToBuffer(_micBuf, processed);
+            FeedRenderer(_cable, processed);
         }
-
-        OnFrameProcessed();  // 更新缓冲水位统计
-    }
-
-    // ── 缓冲水位统计（每帧调用） ──
-
-    private void OnFrameProcessed()
-    {
-        var buf = _speakerBuf;
-        if (buf == null) return;
-
-        _monitorFrameCount++;
-        if (_monitorFrameCount % MonitorInterval != 0) return;
-
-        var ms = buf.BufferedDuration.TotalMilliseconds;
-        var bytes = buf.BufferedBytes;
-
-        // 更新统计
-        if (_speakerStats.SampleCount == 0)
-        {
-            _speakerStats.MinMs = ms;
-            _speakerStats.MaxMs = ms;
-        }
-        else
-        {
-            if (ms < _speakerStats.MinMs) _speakerStats.MinMs = ms;
-            if (ms > _speakerStats.MaxMs) _speakerStats.MaxMs = ms;
-        }
-        _speakerStats.CurrentMs = ms;
-        _speakerStats.AvgMs = ((_speakerStats.AvgMs * _speakerStats.SampleCount) + ms) / (_speakerStats.SampleCount + 1);
-        _speakerStats.SampleCount++;
-
-        // 异常日志：只在状态异常或突变时输出
-        var delta = Math.Abs(ms - _prevBufMs);
-        var shouldLog = false;
-        var reason = "";
-
-        if (ms < 20)                              { shouldLog = true; reason = "UNDERRUN"; }
-        else if (ms > _config.BufferMs * 0.8)             { shouldLog = true; reason = "NEAR_FULL"; }
-        else if (delta > 30 && _prevBufMs > 0)    { shouldLog = true; reason = $"JUMP {delta:F0}ms"; }
-
-        if (shouldLog)
-        {
-            Log.I("AudioRouter",
-                $"[BufMonitor] {reason} | " +
-                $"Cur={ms:F0}ms Min={_speakerStats.MinMs:F0}ms " +
-                $"Max={_speakerStats.MaxMs:F0}ms Avg={_speakerStats.AvgMs:F0}ms " +
-                $"Bytes={bytes}");
-        }
-
-        _prevBufMs = ms;
     }
 
     /// <summary>停止所有输出。</summary>
@@ -262,8 +178,8 @@ public sealed class AudioRouter : IDisposable
     {
         lock (_lock)
         {
-            StopSpeaker();
-            StopMic();
+            _speaker.Stop();
+            _cable.Stop();
             _fadeSamplePos = 0;
         }
     }
@@ -274,7 +190,8 @@ public sealed class AudioRouter : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            Stop();
+            _speaker.Release();
+            _cable.Release();
         }
     }
 
@@ -285,7 +202,6 @@ public sealed class AudioRouter : IDisposable
         var result = new float[pcm.Length];
         for (int i = 0; i < fadeLen; i++)
         {
-            // 淡入系数从 0→1（考虑跨帧累计位置）
             float t = (fadePos + i) / (float)FadeSamplesTotal;
             result[i] = pcm[i] * t;
         }
@@ -314,28 +230,28 @@ public sealed class AudioRouter : IDisposable
         return _gainScratch;
     }
 
-    // ── 输出设备管理 ──
+    // ── 渲染器管理 ──
 
     private bool EnsureSpeaker()
     {
-        if (_speakerOut != null) return true;
+        if (_speaker.IsReady) { _speaker.Play(); return true; }
         return StartSpeaker();
     }
 
-    private bool EnsureMic()
+    private bool EnsureCable()
     {
-        if (_micOut != null) return true;
-        return StartMic();
+        if (_cable.IsReady) { _cable.Play(); return true; }
+        return StartCable();
     }
 
     private bool OutputsReady(RouteMode mode)
     {
         return mode switch
         {
-            RouteMode.SpeakerOnly => _speakerOut != null,
-            RouteMode.MicOnly => _micOut != null,
-            RouteMode.Both => _speakerOut != null && _micOut != null,
-            RouteMode.MicOnlySys => _micOut != null,
+            RouteMode.SpeakerOnly => _speaker.IsReady,
+            RouteMode.MicOnly => _cable.IsReady,
+            RouteMode.Both => _speaker.IsReady && _cable.IsReady,
+            RouteMode.MicOnlySys => _cable.IsReady,
             _ => false,
         };
     }
@@ -349,136 +265,53 @@ public sealed class AudioRouter : IDisposable
                 break;
             case RouteMode.MicOnly:
             case RouteMode.MicOnlySys:
-                EnsureMic();
+                EnsureCable();
                 break;
             case RouteMode.Both:
                 EnsureSpeaker();
-                EnsureMic();
+                EnsureCable();
                 break;
         }
     }
 
     private bool StartSpeaker()
     {
-        try
+        if (!_speaker.Prepare(_config))
         {
-            _speakerBuf = new BufferedWaveProvider(WaveFormat)
-            {
-                BufferDuration = TimeSpan.FromMilliseconds(_config.BufferMs),
-                DiscardOnBufferOverflow = true,
-            };
-
-            _speakerOut = new WaveOutEvent { DesiredLatency = _config.WaveOutLatency };
-            _speakerOut.Init(_speakerBuf);
-            _speakerOut.Play();
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Log.E("AudioRouter", $"Speaker init failed: {ex.Message}");
-            StopSpeaker();
-            OnError?.Invoke($"扬声器输出初始化失败: {ex.Message}");
+            OnError?.Invoke("扬声器输出初始化失败");
             return false;
         }
+        _speaker.Play();
+        return true;
     }
 
-    private bool StartMic()
+    private bool StartCable()
     {
-        var cableDevice = FindCableDevice();
-        if (cableDevice == null)
+        if (!_cable.Prepare(_config))
         {
             OnError?.Invoke("VB-Audio Virtual Cable 未安装，请在 https://vb-audio.com/Cable/ 下载安装");
             return false;
         }
-
-        try
-        {
-            _micBuf = new BufferedWaveProvider(WaveFormat)
-            {
-                BufferDuration = TimeSpan.FromMilliseconds(_config.BufferMs),
-                DiscardOnBufferOverflow = true,
-            };
-
-            _micOut = new WasapiOut(cableDevice, AudioClientShareMode.Shared, true, _config.WasapiLatency);
-            _micOut.Init(_micBuf);
-            _micOut.Play();
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Log.E("AudioRouter", $"CABLE WasapiOut init failed: {ex.Message}");
-            StopMic();
-            OnError?.Invoke($"CABLE Input 打开失败: {ex.Message}");
-            return false;
-        }
+        _cable.Play();
+        return true;
     }
 
-    private void StopSpeaker()
-    {
-        if (_speakerOut != null)
-        {
-            _speakerOut.Stop();
-            _speakerOut.Dispose();
-            _speakerOut = null;
-        }
-        _speakerBuf = null;
-    }
+    // ── float[] → byte[] 转换 + 喂入渲染器 ──
 
-    private void StopMic()
+    private static void FeedRenderer(IAudioRenderer renderer, float[] pcm)
     {
-        if (_micOut != null)
-        {
-            _micOut.Stop();
-            _micOut.Dispose();
-            _micOut = null;
-        }
-        _micBuf = null;
-    }
-
-    // ── buffer 写入（使用 ArrayPool 减少分配） ──
-
-    private static void WriteToBuffer(BufferedWaveProvider? buf, float[] pcm)
-    {
-        if (buf == null) return;
+        if (!renderer.IsReady) return;
 
         int byteLen = pcm.Length * sizeof(float);
         byte[] pooled = BytePool.Rent(byteLen);
         try
         {
             Buffer.BlockCopy(pcm, 0, pooled, 0, byteLen);
-            buf.AddSamples(pooled, 0, byteLen);
+            renderer.FeedPcm(pooled, 0, byteLen);
         }
         finally
         {
             BytePool.Return(pooled);
         }
-    }
-
-    // ── 设备查找 ──
-
-    /// <summary>
-    /// 查找 CABLE Input 设备。优先精确匹配 "CABLE Input"，
-    /// 回退到模糊匹配包含 "CABLE"/"VB-Audio"/"Virtual Cable" 的设备。
-    /// </summary>
-    private static MMDevice? FindCableDevice()
-    {
-        var devices = DeviceEnumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
-
-        foreach (var dev in devices)
-        {
-            if (dev.FriendlyName.Contains("CABLE Input", StringComparison.OrdinalIgnoreCase))
-                return dev;
-        }
-
-        foreach (var dev in devices)
-        {
-            var name = dev.FriendlyName;
-            if (name.Contains("CABLE", StringComparison.OrdinalIgnoreCase) ||
-                name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase) ||
-                name.Contains("Virtual Cable", StringComparison.OrdinalIgnoreCase))
-                return dev;
-        }
-
-        return null;
     }
 }

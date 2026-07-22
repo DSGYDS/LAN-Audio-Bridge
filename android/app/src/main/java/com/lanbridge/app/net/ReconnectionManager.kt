@@ -1,11 +1,8 @@
 package com.lanbridge.app.net
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import com.lanbridge.app.core.infrastructure.Log
+import com.lanbridge.app.core.interfaces.INetworkMonitor
 import com.lanbridge.app.ConnectionState
 import com.lanbridge.app.ConnectionStateManager
 import com.lanbridge.app.audio.AudioPipeline
@@ -35,6 +32,8 @@ class ReconnectionManager(
     private val context: Context,
     private val stateManager: ConnectionStateManager,
     private val pipeline: AudioPipeline,
+    /** 网络状态监听（由 PlatformFactory 创建注入） */
+    private val networkMonitor: INetworkMonitor,
     /** 恢复回调，由 MainActivity 注入，复用已有 doHandshake + pipe.startStreaming */
     private val onRecover: suspend (host: String, mode: Int) -> Boolean
 ) {
@@ -53,55 +52,38 @@ class ReconnectionManager(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var recovering = false
 
-    // ── WiFi 状态监听 ──
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onLost(network: Network) {
-            // 只在 STREAMING 中才进入 RECONNECTING，避免用户在停止后误触发重连
+    // ── 网络状态监听（通过 INetworkMonitor 接口） ──
+    private val networkChangedHandler: (com.lanbridge.app.core.models.NetworkInfo) -> Unit = { info ->
+        if (!info.isConnected) {
+            // 网络断开：只在 STREAMING 中才进入 RECONNECTING
             if (stateManager.state != ConnectionState.STREAMING) {
-                Log.i(TAG, "WiFi 断连，但当前状态为 ${stateManager.state}，不触发重连")
-                return
+                Log.i(TAG, "网络断开，但当前状态为 ${stateManager.state}，不触发重连")
+            } else {
+                Log.i(TAG, "网络断开 → RECONNECTING")
+                stateManager.update(ConnectionState.RECONNECTING)
             }
-            Log.i(TAG, "WiFi 断连 → RECONNECTING")
-            stateManager.update(ConnectionState.RECONNECTING)
-            // 不立即重连，等 WiFi 恢复
-        }
-
-        override fun onAvailable(network: Network) {
-            Log.i(TAG, "WiFi 恢复")
-            // WiFi 恢复后，如果当前是 RECONNECTING 且未在重连中，启动重连
+        } else {
+            // 网络恢复：如果当前是 RECONNECTING 且未在重连中，启动重连
+            Log.i(TAG, "网络恢复")
             if (stateManager.state == ConnectionState.RECONNECTING && !recovering) {
                 startRecovery()
-            }
-        }
-
-        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            // 有互联网能力时视为 WiFi 完全可用
-            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                if (stateManager.state == ConnectionState.RECONNECTING && !recovering) {
-                    startRecovery()
-                }
             }
         }
     }
 
     // ── 生命周期 ──
 
-    /** 开始监听 WiFi 状态变化 */
+    /** 开始监听网络状态变化（通过 INetworkMonitor） */
     fun start() {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        cm.registerNetworkCallback(request, networkCallback)
+        networkMonitor.onNetworkChanged = networkChangedHandler
+        networkMonitor.start()
         Log.i(TAG, "ReconnectionManager started")
     }
 
     /** 停止监听，取消所有重连任务 */
     fun stop() {
-        try {
-            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            cm.unregisterNetworkCallback(networkCallback)
-        } catch (_: Exception) {}
+        networkMonitor.stop()
+        networkMonitor.onNetworkChanged = null
         scope.cancel()
         recovering = false
         Log.i(TAG, "ReconnectionManager stopped")
@@ -208,24 +190,22 @@ class ReconnectionManager(
 
     /**
      * 临时扫描 mDNS，取第一个发现的设备 IP
+     * 通过 IDiscovery 接口（而非直接调用 LanAudioDiscovery）
      * 超时 [MDNS_TIMEOUT_MS] 返回 null
      */
     private suspend fun scanMdns(): String? {
-        val discovery = LanAudioDiscovery(context)
+        val discovery = com.lanbridge.app.core.factory.PlatformFactory.createDiscovery(context)
         var foundHost: String? = null
         val latch = CompletableDeferred<Unit>()
 
-        discovery.setOnDeviceFound { device ->
+        discovery.onDeviceFound = { device ->
             if (foundHost == null) {
-                foundHost = device.host
+                foundHost = device.ip
                 latch.complete(Unit)
             }
         }
-        discovery.setOnError { msg ->
-            Log.w(TAG, "mDNS 扫描错误: $msg")
-        }
 
-        discovery.startScan()
+        discovery.start()
 
         try {
             withTimeout(MDNS_TIMEOUT_MS) { latch.await() }
@@ -235,7 +215,7 @@ class ReconnectionManager(
             // 协程取消，不处理
         }
 
-        discovery.stopScan()
+        discovery.stop()
         return foundHost
     }
 }
