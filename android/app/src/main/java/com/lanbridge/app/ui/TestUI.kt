@@ -68,8 +68,8 @@ fun TestUI() {
         linkManager.wifiLan.onStreamingChanged = { s -> streaming = s }
         linkManager.wifiDirect.onStatusChanged = { msg -> status = msg }
         linkManager.wifiDirect.onStreamingChanged = { s -> streaming = s }
-        linkManager.start()
-        onDispose { linkManager.stop() }
+        linkManager.wifiLan.start()
+        onDispose { linkManager.wifiLan.stop() }
     }
 
     // ── mDNS 设备发现（LAN 链路特有） ──
@@ -130,7 +130,7 @@ fun TestUI() {
                         selected = r == route, onClick = {
                             route = r
                             if (streaming) scope.launch {
-                                val needProj = linkManager.routeToCapture(r) != AudioPipeline.MODE_MIC
+                                val needProj = LinkManager.routeToCapture(r) != AudioPipeline.MODE_MIC
                                 linkManager.sendRouteUpdate(r, if (needProj && projReady) proj else null)
                             }
                         }, role = Role.RadioButton
@@ -208,7 +208,7 @@ fun TestUI() {
             } else {
                 if (ContextCompat.checkSelfPermission(act, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
                 { micPerm.launch(Manifest.permission.RECORD_AUDIO); return@Button }
-                val capMode = linkManager.routeToCapture(route)
+                val capMode = LinkManager.routeToCapture(route)
                 if ((capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) && !projReady)
                 { status = "请先授权系统音频"; return@Button }
                 scope.launch {
@@ -236,7 +236,7 @@ fun TestUI() {
         QrScannerScreen(
             onScanned = { qr ->
                 showScanner = false
-                val capMode = linkManager.routeToCapture(route)
+                val capMode = LinkManager.routeToCapture(route)
                 if ((capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) && !projReady) {
                     status = "请先授权系统音频"
                     return@QrScannerScreen
