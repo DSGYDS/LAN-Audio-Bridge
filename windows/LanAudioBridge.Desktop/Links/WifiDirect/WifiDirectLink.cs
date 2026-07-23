@@ -22,10 +22,6 @@ public sealed class WifiDirectLink : ILink
     public const byte LinkTypeId = 0x02;
     public const int AudioPort = 12345;
     public const int HandshakePort = 12347;
-    public const string GoIp = "192.168.49.1";
-    public const int DiscoverTimeoutMs = 120_000;
-    public const int IpPollIntervalMs = 500;
-    public const int IpPollMaxRetries = 30;
 
     // ── 核心模块 ──
     private WifiDirectP2pHelper? _p2pHelper;
@@ -107,7 +103,7 @@ public sealed class WifiDirectLink : ILink
         ITransport? transport = null;
         try
         {
-            var goIp = _p2pHelper?.GoIp ?? GoIp;
+            var goIp = WifiDirectP2pHelper.GoIp;
             var token = _p2pHelper?.Token ?? "";
 
             // 等待 P2P 网络稳定 + Android 端 waitForHello 开始监听

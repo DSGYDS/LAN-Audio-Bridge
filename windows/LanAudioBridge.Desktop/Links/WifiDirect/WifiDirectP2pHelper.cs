@@ -27,11 +27,16 @@ public sealed class WifiDirectP2pHelper : IDisposable
     private const int ConnectTimeoutMs = 15_000;
     private const int MaxConnectRetries = 3;
 
+    // ── P2P 链路常量（自包含，不依赖 WifiDirectLink） ──
+    public const string GoIp = "192.168.49.1";
+    public const int DiscoverTimeoutMs = 120_000;
+    public const int IpPollIntervalMs = 500;
+    public const int IpPollMaxRetries = 30;
+
     // ── 公开属性（供 UI / QR 码使用） ──
     public string DeviceName { get; }
     public string Token { get; }
     public string? LocalIp { get; private set; }
-    public string? GoIp { get; private set; }
     public bool IsConnected { get; private set; }
 
     /// <summary>P2P 连接就绪（已连接到 Android GO），可发起握手</summary>
@@ -105,7 +110,6 @@ public sealed class WifiDirectP2pHelper : IDisposable
                 }
 
                 LocalIp = ip;
-                GoIp = WifiDirectLink.GoIp;
                 IsConnected = true;
                 ReportStatus($"P2P 就绪 ✓ local={ip} go={GoIp}");
                 Log.I(Tag, $"P2P ready: local={ip}, GO={GoIp}");
@@ -122,7 +126,6 @@ public sealed class WifiDirectP2pHelper : IDisposable
                 ReportStatus("P2P 连接断开，重新等待手机...");
                 IsConnected = false;
                 LocalIp = null;
-                GoIp = null;
                 CleanupDevice();
                 OnDisconnected?.Invoke();
             }
@@ -154,7 +157,6 @@ public sealed class WifiDirectP2pHelper : IDisposable
 
         IsConnected = false;
         LocalIp = null;
-        GoIp = null;
         _cts?.Dispose();
         _cts = null;
         return Task.CompletedTask;
@@ -217,7 +219,7 @@ public sealed class WifiDirectP2pHelper : IDisposable
 
         // 等待设备发现（120s 超时）
         using var reg = ct.Register(() => _deviceFoundTcs?.TrySetCanceled());
-        var timeoutTask = Task.Delay(WifiDirectLink.DiscoverTimeoutMs, ct);
+        var timeoutTask = Task.Delay(DiscoverTimeoutMs, ct);
         var completedTask = await Task.WhenAny(_deviceFoundTcs.Task, timeoutTask);
 
         progressTimer.Dispose();
@@ -323,7 +325,7 @@ public sealed class WifiDirectP2pHelper : IDisposable
 
     private async Task<string?> PollForP2pIpAsync(CancellationToken ct)
     {
-        for (int i = 0; i < WifiDirectLink.IpPollMaxRetries; i++)
+        for (int i = 0; i < IpPollMaxRetries; i++)
         {
             ct.ThrowIfCancellationRequested();
             var ip = GetP2pAdapterIp();
@@ -332,7 +334,7 @@ public sealed class WifiDirectP2pHelper : IDisposable
                 Log.I(Tag, $"P2P adapter IP found: {ip} (poll #{i + 1})");
                 return ip;
             }
-            await Task.Delay(WifiDirectLink.IpPollIntervalMs, ct);
+            await Task.Delay(IpPollIntervalMs, ct);
         }
         return null;
     }

@@ -48,9 +48,9 @@ class AudioPipeline(config: AudioConfig = AudioConfig.DEFAULT) {
     fun setOnOpusData(cb: (ByteArray, Int) -> Unit) { encodeSender.onOpusData = cb }
 
     // ── 启动推流 ──
-    fun startStreaming(m: Int = MODE_MIC, proj: MediaProjection? = null, ctx: Context? = null, host: String? = null, port: Int = 12345): Boolean {
+    fun startStreaming(m: Int = MODE_MIC, proj: MediaProjection? = null, ctx: Context? = null, host: String? = null, port: Int = 12345, localBindAddress: String? = null): Boolean {
         if (isStreaming()) return true
-        if (!encodeSender.prepare(host, port)) return false
+        if (!encodeSender.prepare(host, port, localBindAddress)) return false
         encodeSender.reset()
         mode = m
         val started = captureLoop.start(m, proj, ctx)

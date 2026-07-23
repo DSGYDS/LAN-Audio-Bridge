@@ -93,7 +93,6 @@ class WifiDirectManager(private val context: Context) {
                 }
 
                 Log.i(TAG, "P2P Group created, GO IP=$goIp")
-                HandshakeManager.p2pLocalIp = goIp  // GO 的 IP 就是本地 IP
                 _statusFlow.value = "P2P ✓ go=$goIp 等待电脑连接..."
 
                 // 2. 等待 Windows 连接到 Group
@@ -203,8 +202,6 @@ class WifiDirectManager(private val context: Context) {
             override fun onSuccess() { Log.i(TAG, "P2P group removed") }
             override fun onFailure(reason: Int) { Log.w(TAG, "removeGroup failed: $reason") }
         })
-        HandshakeManager.p2pLocalIp = null
-        HandshakeManager.p2pQrHostIp = null
         _statusFlow.value = "P2P 已断开"
     }
 

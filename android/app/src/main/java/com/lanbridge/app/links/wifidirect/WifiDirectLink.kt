@@ -51,10 +51,12 @@ class WifiDirectLink(
     override var onStatusChanged: ((String) -> Unit)? = null
     override var onStreamingChanged: ((Boolean) -> Unit)? = null
 
-    // ── P2P 特有状态 ──
+    // ── P2P 特有状态（链路自治，不依赖外部） ──
     @Volatile var p2pTargetIp: String? = null
         private set
     @Volatile var currentRoute: Int = 0
+    private var p2pLocalIp: String? = null       // Android P2P 接口 IP（GO IP）
+    private var lastRemoteIp: String? = null     // 上次握手的 Windows IP（重连用）
 
     // ── ILink 实现 ──
 
@@ -72,21 +74,22 @@ class WifiDirectLink(
             stateManager.update(ConnectionState.ERROR)
             return@withLock false
         }
+        p2pLocalIp = goIp
 
         stateManager.update(ConnectionState.CONNECTING)
 
         // 重连策略：已知 Windows IP 时主动发 HELLO，否则被动等待
-        val knownWinIp = HandshakeManager.lastRemoteIp
-        val handshakeOk = if (knownWinIp != null) {
+        val handshakeOk = if (lastRemoteIp != null) {
             onStatusChanged?.invoke("P2P 重连中，主动握手...")
             withContext(Dispatchers.IO) {
-                HandshakeManager.handshake(knownWinIp, params.route, token, LinkType.WIFI_DIRECT)
+                HandshakeManager.handshake(lastRemoteIp!!, params.route, token, LinkType.WIFI_DIRECT, p2pLocalIp)
             }
         } else {
             onStatusChanged?.invoke("P2P GO 就绪 ($goIp)，等待电脑连接...")
-            withContext(Dispatchers.IO) {
-                HandshakeManager.waitForHello(token, params.route)
+            val remoteIp = withContext(Dispatchers.IO) {
+                P2pHandshakeServer.waitForHello(token, params.route)
             }
+            if (remoteIp != null) { lastRemoteIp = remoteIp; true } else false
         }
         if (!handshakeOk) {
             onStatusChanged?.invoke("P2P 握手失败（电脑未响应）")
@@ -100,13 +103,13 @@ class WifiDirectLink(
         // 配对持久化：握手成功即写入，后续冷启动免扫码
         P2pPairStore.save(context, token, params.deviceName ?: "")
 
-        val winP2pIp = HandshakeManager.lastRemoteIp ?: goIp
+        val winP2pIp = lastRemoteIp ?: goIp
         p2pTargetIp = winP2pIp
         val capMode = routeToCapture(params.route)
 
         val ok = withContext(Dispatchers.IO) {
             pipe.currentLinkType = LinkType.WIFI_DIRECT
-            pipe.startStreaming(capMode, params.proj, context, winP2pIp)
+            pipe.startStreaming(capMode, params.proj, context, winP2pIp, localBindAddress = p2pLocalIp)
         }
 
         if (ok) {
@@ -131,15 +134,17 @@ class WifiDirectLink(
         if (!ok) { onStatusChanged?.invoke("需先授权系统音频"); return false }
 
         val targetIp = p2pTargetIp ?: return false
-        withContext(Dispatchers.IO) { HandshakeManager.sendRouteUpdate(targetIp, route, LinkType.WIFI_DIRECT) }
+        withContext(Dispatchers.IO) { HandshakeManager.sendRouteUpdate(targetIp, route, LinkType.WIFI_DIRECT, p2pLocalIp) }
         return true
     }
 
     override fun disconnect() {
         context.stopService(Intent(context, StreamingService::class.java))
         pipe.stopStreaming()
+        wifiDirectManager.disconnect()
         isStreaming = false
         p2pTargetIp = null
+        p2pLocalIp = null
         stateManager.update(ConnectionState.DISCONNECTED)
         onStatusChanged?.invoke("已停止")
         onStreamingChanged?.invoke(false)

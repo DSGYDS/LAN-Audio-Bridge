@@ -38,7 +38,7 @@ class EncodeSender(private val config: AudioConfig) {
     var onOpusData: ((ByteArray, Int) -> Unit)? = null
 
     /** 准备编码器 + 创建 Transport */
-    fun prepare(host: String?, port: Int): Boolean {
+    fun prepare(host: String?, port: Int, localBindAddress: String? = null): Boolean {
         if (!enc.prepare()) return false
         if (host != null) {
             try {
@@ -46,7 +46,7 @@ class EncodeSender(private val config: AudioConfig) {
                     type = TransportType.Udp,
                     host = host,
                     port = port,
-                    localBindAddress = com.lanbridge.app.net.HandshakeManager.p2pLocalIp
+                    localBindAddress = localBindAddress
                 ) as UdpTransport
                 runBlocking { t.connect() }
                 transport = t

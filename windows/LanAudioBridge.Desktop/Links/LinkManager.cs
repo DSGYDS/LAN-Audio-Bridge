@@ -23,15 +23,18 @@ public sealed class LinkManager : IDisposable
 
     public float Volume
     {
-        get => _wifiLan.Volume;
-        set => _wifiLan.Volume = value;
+        get => _wifiLan.Engine.Volume;
+        set => _wifiLan.Engine.Volume = value;
     }
 
     public LinkManager()
     {
         _wifiLan = new WifiLanLink(_stateManager);
-        _wifiDirect = new WifiDirectLink(_stateManager, _wifiLan.HandleRoute);
+        _wifiDirect = new WifiDirectLink(_stateManager, HandleRoute);
     }
+
+    /// <summary>共享路由控制 — 任何链路握手成功后都通过这里设置 AudioRouter 模式</summary>
+    private bool HandleRoute(int route) => _wifiLan.HandleRoute(route);
 
     // ── 操作转发 ──
 
