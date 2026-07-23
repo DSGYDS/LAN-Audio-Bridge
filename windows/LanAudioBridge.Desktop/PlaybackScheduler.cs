@@ -35,10 +35,21 @@ public sealed class PlaybackScheduler : IDisposable
     private long _pullNullCount;
     private DateTime _diagLastLog = DateTime.UtcNow;
 
+    /// <summary>获取 JitterBuffer 实例（诊断/统计用）</summary>
     public JitterBuffer Buffer => _jitterBuffer;
+    /// <summary>取帧成功次数（用于诊断音频流畅度）</summary>
     public long PullOkCount => Interlocked.Read(ref _pullOkCount);
+    /// <summary>取帧失败/underrun 次数（用于诊断音频卡顿）</summary>
     public long PullNullCount => Interlocked.Read(ref _pullNullCount);
 
+    /// <summary>
+    /// 创建播放调度器
+    /// </summary>
+    /// <param name="jitterBuffer">抖动缓冲实例，用于缓存乱序到达的音频帧</param>
+    /// <param name="router">音频路由，将 PCM 帧输出到扬声器/线缆</param>
+    /// <param name="decoder">Opus 解码管线，用于 underrun 时生成 comfort noise（PLC）</param>
+    /// <param name="volumeGetter">音量获取委托，避免重复持有 AudioEngine 引用</param>
+    /// <param name="diagGetter">可选诊断统计委托，来自 AudioEngine 的收发计数</param>
     public PlaybackScheduler(
         JitterBuffer jitterBuffer,
         AudioRouter router,
@@ -53,12 +64,14 @@ public sealed class PlaybackScheduler : IDisposable
         _diagGetter = diagGetter;
     }
 
+    /// <summary>启动 20ms 定时播放循环，开始从 JitterBuffer 取帧播放</summary>
     public void Start()
     {
         _running = true;
         _playbackTimer = new Timer(_ => Tick(), null, 20, 20);
     }
 
+    /// <summary>停止播放循环，释放定时器资源</summary>
     public void Stop()
     {
         _running = false;

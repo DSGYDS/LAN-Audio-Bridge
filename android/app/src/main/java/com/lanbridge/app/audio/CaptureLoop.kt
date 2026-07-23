@@ -77,7 +77,10 @@ class CaptureLoop(
         return true
     }
 
-    /** 停止采集线程（供 switchMode 用，不释放全部资源） */
+    /**
+     * 停止采集线程（不释放全部资源，供 switchMode 切换模式时使用）
+     * @param releaseSystemAudio 是否释放系统音频采集器
+     */
     fun stop(releaseSystemAudio: Boolean = false) {
         stopping = true
         streaming = false
@@ -89,7 +92,10 @@ class CaptureLoop(
         else sysCapturer?.stop()
     }
 
-    /** 完全释放（stopStreaming 时） */
+    /**
+     * 完全释放所有采集器资源（stopStreaming 时调用）
+     * 停止线程并释放 micCapturer 和 sysCapturer
+     */
     fun release() {
         stopping = true
         streaming = false
