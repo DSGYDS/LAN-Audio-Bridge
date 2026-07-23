@@ -32,7 +32,6 @@ public sealed class JitterBuffer
     private int _pushOkCount;
     private int _pushLateCount;
     private int _pushDupCount;
-    private int _pushOverflowCount;
     private int _pullGapCount;
     private int _consecutiveUnderrun;   // 连续 underrun 计数（容忍短暂帧到达延迟）
     private const int UnderrunSkipThreshold = 5;  // 正常模式：连续 5 次 underrun（100ms）后跳过
