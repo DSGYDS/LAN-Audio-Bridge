@@ -31,6 +31,7 @@ public sealed class WifiDirectLink : ILink
     private WifiDirectP2pHelper? _p2pHelper;
     private readonly ConnectionStateManager _stateManager;
     private readonly Func<int, bool> _onHandshakeRoute;
+    private CancellationTokenSource? _helloCts;  // 握手任务取消令牌
 
     // ── 事件（LinkManager / UI 订阅） ──
     public Action<string>? OnP2pStatusChanged;
@@ -65,7 +66,9 @@ public sealed class WifiDirectLink : ILink
         var qrContent = QrCodeHelper.BuildQrPayload(_p2pHelper.DeviceName, _p2pHelper.Token);
         OnQrChanged?.Invoke(qrContent, _p2pHelper.DeviceName);
 
-        _p2pHelper.OnConnected += () => _ = Task.Run(() => SendHelloToAndroidGo());
+        _helloCts = new CancellationTokenSource();
+        var helloToken = _helloCts.Token;
+        _p2pHelper.OnConnected += () => _ = Task.Run(() => SendHelloToAndroidGo(helloToken));
 
         OnP2pActiveChanged?.Invoke(true);
 
@@ -75,6 +78,11 @@ public sealed class WifiDirectLink : ILink
     public async Task StopAsync()
     {
         if (_p2pHelper == null) return;
+
+        // 先取消正在进行的握手任务
+        _helloCts?.Cancel();
+        _helloCts?.Dispose();
+        _helloCts = null;
 
         await _p2pHelper.StopAsync();
         _p2pHelper.Dispose();
@@ -94,7 +102,7 @@ public sealed class WifiDirectLink : ILink
     private const int HelloTimeoutMs = 3_000;         // 每次等待 ACK 超时
     private const int HelloRetryDelayMs = 2_000;      // 重试间隔
 
-    private async Task SendHelloToAndroidGo()
+    private async Task SendHelloToAndroidGo(CancellationToken ct)
     {
         ITransport? transport = null;
         try
@@ -105,7 +113,7 @@ public sealed class WifiDirectLink : ILink
             // 等待 P2P 网络稳定 + Android 端 waitForHello 开始监听
             Log.I(Tag, $"P2P connected, waiting {HelloInitialDelayMs}ms before HELLO...");
             OnP2pStatusChanged?.Invoke("P2P 已连接，等待手机端就绪...");
-            await Task.Delay(HelloInitialDelayMs);
+            await Task.Delay(HelloInitialDelayMs, ct);
 
             Log.I(Tag, $"Sending HELLO to Android GO: {goIp}:{HandshakePort}");
             transport = PlatformFactory.CreateTransport(TransportType.Udp, goIp, HandshakePort);
@@ -128,6 +136,7 @@ public sealed class WifiDirectLink : ILink
 
             for (int i = 0; i < HelloMaxAttempts; i++)
             {
+                ct.ThrowIfCancellationRequested();
                 await transport.SendAsync(encoded);
                 Log.I(Tag, $"HELLO sent to {goIp}:{HandshakePort} (attempt {i + 1}/{HelloMaxAttempts})");
                 OnP2pStatusChanged?.Invoke($"正在握手...（{i + 1}/{HelloMaxAttempts}）");
@@ -159,15 +168,19 @@ public sealed class WifiDirectLink : ILink
                         }
                     }
                 }
-                catch (OperationCanceledException) { /* timeout, retry */ }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { /* timeout, retry */ }
 
                 // 重试前等待
                 if (i < HelloMaxAttempts - 1)
-                    await Task.Delay(HelloRetryDelayMs);
+                    await Task.Delay(HelloRetryDelayMs, ct);
             }
 
             Log.W(Tag, $"P2P handshake failed: no HELLO_ACK after {HelloMaxAttempts} attempts");
             OnP2pStatusChanged?.Invoke("P2P 握手失败（手机未响应），等待重连...");
+        }
+        catch (OperationCanceledException)
+        {
+            Log.I(Tag, "HELLO task cancelled (P2P stopped)");
         }
         catch (Exception ex)
         {
