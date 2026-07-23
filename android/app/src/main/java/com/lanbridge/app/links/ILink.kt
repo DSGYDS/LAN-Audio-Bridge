@@ -32,6 +32,7 @@ interface ILink {
 data class LinkParams(
     val host: String? = null,          // LAN: 目标 IP
     val token: String? = null,         // P2P: QR 码 token
+    val deviceName: String? = null,    // P2P: 对端设备名（配对持久化用）
     val route: Int = 0,                // 路线 0-3
     val proj: MediaProjection? = null  // 系统音频授权
 )

@@ -213,7 +213,7 @@ fun TestUI() {
                 { status = "请先授权系统音频"; return@Button }
                 scope.launch {
                     val needProj = capMode != AudioPipeline.MODE_MIC
-                    linkManager.connect(LinkType.WIFI_LAN, LinkParams(
+                    linkManager.reconnect(LinkParams(
                         host = ip, route = route, proj = if (needProj) proj else null
                     ))
                 }
@@ -244,7 +244,7 @@ fun TestUI() {
                 scope.launch {
                     val needProj = capMode != AudioPipeline.MODE_MIC
                     linkManager.connect(LinkType.WIFI_DIRECT, LinkParams(
-                        token = qr.token, route = route, proj = if (needProj) proj else null
+                        token = qr.token, deviceName = qr.deviceName, route = route, proj = if (needProj) proj else null
                     ))
                 }
             },

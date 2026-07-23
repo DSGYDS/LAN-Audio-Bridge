@@ -11,8 +11,11 @@ import com.lanbridge.app.links.ILink
 import com.lanbridge.app.links.LinkParams
 import com.lanbridge.app.net.HandshakeManager
 import com.lanbridge.app.net.LinkType
+import com.lanbridge.app.net.P2pPairStore
 import com.lanbridge.app.net.WifiDirectManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -40,6 +43,7 @@ class WifiDirectLink(
 
     // ── 子模块 ──
     val wifiDirectManager = WifiDirectManager(context)
+    private val connectMutex = Mutex()  // 防止并发 connect（扫码过快时两次调用冲突）
 
     // ── ILink 状态 ──
     @Volatile override var isStreaming = false
@@ -54,8 +58,11 @@ class WifiDirectLink(
 
     // ── ILink 实现 ──
 
-    override suspend fun connect(params: LinkParams): Boolean {
-        val token = params.token ?: return false
+    override suspend fun connect(params: LinkParams): Boolean = connectMutex.withLock {
+        // token 来源：扫码传入 或 已配对存储（冷启动免扫码）
+        val token = params.token
+            ?: P2pPairStore.load(context)?.token
+            ?: return@withLock false
         currentRoute = params.route
 
         onStatusChanged?.invoke("正在创建 P2P Group...")
@@ -63,23 +70,35 @@ class WifiDirectLink(
         if (goIp == null) {
             onStatusChanged?.invoke("P2P Group 创建失败")
             stateManager.update(ConnectionState.ERROR)
-            return false
+            return@withLock false
         }
 
         stateManager.update(ConnectionState.CONNECTING)
-        onStatusChanged?.invoke("P2P GO 就绪 ($goIp)，等待电脑连接...")
 
-        val handshakeOk = withContext(Dispatchers.IO) {
-            HandshakeManager.waitForHello(token, params.route)
+        // 重连策略：已知 Windows IP 时主动发 HELLO，否则被动等待
+        val knownWinIp = HandshakeManager.lastRemoteIp
+        val handshakeOk = if (knownWinIp != null) {
+            onStatusChanged?.invoke("P2P 重连中，主动握手...")
+            withContext(Dispatchers.IO) {
+                HandshakeManager.handshake(knownWinIp, params.route, token, LinkType.WIFI_DIRECT)
+            }
+        } else {
+            onStatusChanged?.invoke("P2P GO 就绪 ($goIp)，等待电脑连接...")
+            withContext(Dispatchers.IO) {
+                HandshakeManager.waitForHello(token, params.route)
+            }
         }
         if (!handshakeOk) {
-            onStatusChanged?.invoke("P2P 握手失败（电脑未发起连接）")
+            onStatusChanged?.invoke("P2P 握手失败（电脑未响应）")
             stateManager.update(ConnectionState.ERROR)
-            return false
+            return@withLock false
         }
 
         stateManager.update(ConnectionState.CONNECTED)
         onStatusChanged?.invoke("P2P 握手成功 ✓ 准备推流")
+
+        // 配对持久化：握手成功即写入，后续冷启动免扫码
+        P2pPairStore.save(context, token, params.deviceName ?: "")
 
         val winP2pIp = HandshakeManager.lastRemoteIp ?: goIp
         p2pTargetIp = winP2pIp
@@ -100,7 +119,7 @@ class WifiDirectLink(
             onStatusChanged?.invoke("P2P 启动推流失败")
             stateManager.update(ConnectionState.ERROR)
         }
-        return ok
+        ok
     }
 
     override suspend fun sendRouteUpdate(route: Int, proj: MediaProjection?): Boolean {

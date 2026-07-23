@@ -30,8 +30,7 @@ public sealed class LinkManager : IDisposable
     public LinkManager()
     {
         _wifiLan = new WifiLanLink(_stateManager);
-        _wifiDirect = new WifiDirectLink(
-            _wifiLan.HandshakeServer, _stateManager, _wifiLan.HandleRoute);
+        _wifiDirect = new WifiDirectLink(_stateManager, _wifiLan.HandleRoute);
     }
 
     // ── 操作转发 ──

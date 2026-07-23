@@ -60,12 +60,13 @@ object HandshakeManager {
             transport = PlatformFactory.createTransport(
                 type = TransportType.Udp, port = HANDSHAKE_PORT
             ) as UdpTransport
-            val helloReceived = CompletableDeferred<Pair<ByteArray, String>>()  // data + remote IP
+            val helloReceived = CompletableDeferred<Triple<ByteArray, String, Int>>()  // data + remote IP + remote port
 
             transport.onPacketReceived = { data ->
-                // 从 DatagramPacket 获取远端地址（通过 UdpTransport 的 server 模式）
+                // 从 DatagramPacket 获取远端地址和端口（通过 UdpTransport 的 server 模式）
                 val remoteIp = transport.lastRemoteHost ?: "unknown"
-                helloReceived.complete(Pair(data, remoteIp))
+                val remotePort = transport.lastRemotePort
+                helloReceived.complete(Triple(data, remoteIp, remotePort))
             }
             runBlocking { transport.connect() }
 
@@ -76,9 +77,9 @@ object HandshakeManager {
                 return false
             }
 
-            val (data, remoteIp) = result
+            val (data, remoteIp, remotePort) = result
             lastRemoteIp = remoteIp
-            Log.i(TAG, "waitForHello: received packet from $remoteIp, decoding...")
+            Log.i(TAG, "waitForHello: received packet from $remoteIp:$remotePort, decoding...")
 
             val decoded = protocol.decode(data)
             if (decoded == null || decoded.type != PacketType.HELLO) {
@@ -100,11 +101,11 @@ object HandshakeManager {
                 }
             }
 
-            // 回复 HELLO_ACK（payload 携带 route，让 Windows 设置正确的 AudioRouter 模式）
+            // 回复 HELLO_ACK 到 HELLO 的来源端口（非固定 12347，Windows 从随机端口发来）
             val ackPayload = byteArrayOf(route.toByte())
             val ackPacket = Packet(PacketType.HELLO_ACK, LinkType.WIFI_DIRECT, 0u, ackPayload)
-            transport.sendTo(protocol.encode(ackPacket), remoteIp, HANDSHAKE_PORT)
-            Log.i(TAG, "waitForHello: HELLO_ACK sent to $remoteIp (route=$route), handshake OK")
+            transport.sendTo(protocol.encode(ackPacket), remoteIp, remotePort)
+            Log.i(TAG, "waitForHello: HELLO_ACK sent to $remoteIp:$remotePort (route=$route), handshake OK")
             true
         } catch (e: Exception) {
             Log.e(TAG, "waitForHello error: ${e.message}")

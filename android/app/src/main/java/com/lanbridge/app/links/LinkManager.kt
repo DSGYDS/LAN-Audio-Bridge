@@ -7,6 +7,7 @@ import com.lanbridge.app.audio.AudioPipeline
 import com.lanbridge.app.links.wifidirect.WifiDirectLink
 import com.lanbridge.app.links.wifilan.WifiLanLink
 import com.lanbridge.app.net.LinkType
+import com.lanbridge.app.net.P2pPairStore
 
 /**
  * LinkManager — 纯路由器（~50 行）
@@ -15,7 +16,7 @@ import com.lanbridge.app.net.LinkType
  * 不含任何链路实现代码。
  */
 class LinkManager(
-    context: Context,
+    private val context: Context,
     pipe: AudioPipeline,
     val stateManager: ConnectionStateManager
 ) {
@@ -27,6 +28,10 @@ class LinkManager(
 
     private var activeLink: ILink? = null
 
+    /** 上一次活跃的链路类型（用于断开后重连保持同一链路） */
+    var lastLinkType: Byte = LinkType.WIFI_LAN
+        private set
+
     // ── 统一入口 ──
 
     suspend fun connect(linkType: Byte, params: LinkParams): Boolean {
@@ -36,7 +41,20 @@ class LinkManager(
             else -> return false
         }
         activeLink = link
+        lastLinkType = linkType
         return link.connect(params)
+    }
+
+    /**
+     * 重连：沿用上一次的链路类型。
+     * P2P 模式下自动从 P2pPairStore 读取 token，无需再次扫码。
+     */
+    suspend fun reconnect(params: LinkParams): Boolean {
+        return if (lastLinkType == LinkType.WIFI_DIRECT && P2pPairStore.hasPaired(context)) {
+            connect(LinkType.WIFI_DIRECT, params)
+        } else {
+            connect(LinkType.WIFI_LAN, params)
+        }
     }
 
     suspend fun sendRouteUpdate(route: Int, proj: MediaProjection?): Boolean {

@@ -70,7 +70,7 @@ public partial class MainWindow : Window
             });
         p2p.OnP2pActiveChanged += active =>
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                P2pButton.Content = active ? "停止 P2P" : "启动 P2P");
+                P2pButton.Content = active ? "刷新二维码" : "启动 P2P");
 
         // ── 音量滑块 ──
         VolumeText.Text = $"{(int)(VolumeSlider.Value * 100)}%";
@@ -83,15 +83,17 @@ public partial class MainWindow : Window
 
         // ── 启动 LAN 常驻服务 ──
         _ = _linkManager.StartLanAsync();
+
+        // ── P2P 冷启动自动常驻（与 LAN 并行，直到软件关闭） ──
+        _ = _linkManager.StartP2pAsync();
     }
 
-    // ── P2P 按钮 ──
+    // ── P2P 按钮（P2P 已常驻，按钮仅用于重新生成 QR 码） ──
     private async void OnP2pClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (_linkManager.IsP2pActive)
-            await _linkManager.StopP2pAsync();
-        else
-            await _linkManager.StartP2pAsync();
+        // P2P 常驻不可停止，点击仅刷新 QR 码
+        await _linkManager.StopP2pAsync();
+        await _linkManager.StartP2pAsync();
     }
 
     /// <summary>从托盘恢复窗口</summary>

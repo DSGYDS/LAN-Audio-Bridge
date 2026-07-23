@@ -36,6 +36,10 @@ class UdpTransport(
     var lastRemoteHost: String? = null
         private set
 
+    /** 服务端模式：最后收到包的远端端口（用于精确回送 ACK） */
+    var lastRemotePort: Int = 0
+        private set
+
     override suspend fun connect() {
         if (_isConnected) return
 
@@ -97,6 +101,7 @@ class UdpTransport(
                 val packet = DatagramPacket(recvBuf, recvBuf.size)
                 socket.receive(packet)
                 lastRemoteHost = packet.address.hostAddress  // 记录远端 IP
+                lastRemotePort = packet.port                  // 记录远端端口
                 val bytes = packet.data.copyOfRange(0, packet.length)
                 onPacketReceived?.invoke(bytes)
             } catch (e: CancellationException) { break }
