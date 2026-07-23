@@ -113,10 +113,10 @@ public sealed class WifiLanLink : ILink
 
         var mode = route switch
         {
-            0 => AudioRouter.RouteMode.SpeakerOnly,
-            1 => AudioRouter.RouteMode.Both,
-            2 => AudioRouter.RouteMode.MicOnly,
-            3 => AudioRouter.RouteMode.MicOnlySys,
+            0 => AudioRouter.RouteMode.SpeakerOnly,   // 系统音频 → 扬声器
+            1 => AudioRouter.RouteMode.SpeakerOnly,   // 系统音频+麦克风混音 → 扬声器（混音在 Android 端完成，Windows 端只播放）
+            2 => AudioRouter.RouteMode.MicOnly,        // 麦克风 → 虚拟麦克风
+            3 => AudioRouter.RouteMode.MicOnlySys,     // 系统音频 → 虚拟麦克风
             _ => AudioRouter.RouteMode.SpeakerOnly,
         };
 
