@@ -9,7 +9,6 @@ import com.lanbridge.app.StreamingService
 import com.lanbridge.app.audio.AudioPipeline
 import com.lanbridge.app.core.adapters.PacketHeaderAdapter
 import com.lanbridge.app.core.adapters.UsbTransport
-import com.lanbridge.app.core.infrastructure.Log
 import com.lanbridge.app.core.interfaces.Packet
 import com.lanbridge.app.links.ILink
 import com.lanbridge.app.links.LinkManager
@@ -20,8 +19,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * UsbLink — USB 链路（Android 端，主动发起方）
@@ -44,9 +41,6 @@ class UsbLink(
     companion object {
         private const val TAG = "UsbLink"
         const val LINK_TYPE_ID: Byte = LinkType.USB
-        private const val USB_TOKEN = "LABRIDGE"  // 必须 ≤ 8 字符（payload 限制）
-        private const val ACK_TIMEOUT_S = 10L
-        private const val ACK_MAX_ATTEMPTS = 3
     }
 
     // ── 子模块 ──
@@ -95,7 +89,7 @@ class UsbLink(
 
         // 2. 主动发 HELLO → 等待 ACK（与蓝牙 BtHandshakeClient 对称）
         val ackRoute = withContext(Dispatchers.IO) {
-            sendHelloAndWaitForAck(transport, params.route)
+            UsbHandshakeClient.sendHelloAndWaitForAck(transport, params.route)
         }
         if (ackRoute < 0) {
             onStatusChanged?.invoke("USB：握手失败（电脑未响应）")
@@ -162,55 +156,4 @@ class UsbLink(
         onStreamingChanged?.invoke(false)
     }
 
-    // ── 主动握手：发 HELLO → 等 ACK（与蓝牙 BtHandshakeClient 逻辑对称） ──
-
-    /**
-     * 发送 HELLO 并等待 ACK。
-     * 流程：构造 payload[0]=route,[1-8]=token → 发送 → 注册回调等 ACK → 超时重试。
-     * 阻塞调用，必须在 IO 线程执行。
-     * @return ACK 中的 route（0-3），失败返回 -1
-     */
-    private fun sendHelloAndWaitForAck(transport: UsbTransport, route: Int): Int {
-        val protocol = PacketHeaderAdapter()
-
-        // 构造 HELLO payload: [0]=route, [1-8]=token ASCII
-        val tokenBytes = USB_TOKEN.toByteArray(Charsets.US_ASCII)
-        val payload = ByteArray(9)
-        payload[0] = route.toByte()
-        System.arraycopy(tokenBytes, 0, payload, 1, minOf(8, tokenBytes.size))
-
-        val packet = Packet(PacketType.HELLO, LINK_TYPE_ID, 0.toUShort(), payload)
-        val encoded = protocol.encode(packet)
-
-        for (attempt in 1..ACK_MAX_ATTEMPTS) {
-            val latch = CountDownLatch(1)
-            var ackRoute = -1
-
-            transport.onPacketReceived = { data ->
-                val decoded = protocol.decode(data)
-                if (decoded != null && decoded.type == PacketType.HELLO_ACK) {
-                    ackRoute = if (decoded.payload.isNotEmpty())
-                        decoded.payload[0].toInt().coerceIn(0, 3) else 0
-                    latch.countDown()
-                } else if (decoded != null && decoded.type == PacketType.HELLO_NACK) {
-                    ackRoute = -1
-                    latch.countDown()
-                }
-            }
-
-            transport.sendBlocking(encoded)
-            Log.i(TAG, "HELLO sent (attempt $attempt/$ACK_MAX_ATTEMPTS)")
-
-            val completed = latch.await(ACK_TIMEOUT_S, TimeUnit.SECONDS)
-            transport.onPacketReceived = null
-
-            if (completed && ackRoute >= 0) {
-                Log.i(TAG, "HELLO_ACK received, route=$ackRoute")
-                return ackRoute
-            }
-            Log.w(TAG, "ACK timeout (attempt $attempt)")
-        }
-
-        return -1
-    }
 }

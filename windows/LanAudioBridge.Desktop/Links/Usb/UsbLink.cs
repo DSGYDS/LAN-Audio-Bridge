@@ -1,5 +1,4 @@
 using System;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using LanAudioBridge.Core;
@@ -12,7 +11,7 @@ namespace LanAudioBridge.Desktop.Links;
 /// <summary>
 /// UsbLink — USB 链路（Windows 端，常驻监听）
 ///
-/// 职责：后台循环检测 USB 设备 → 自动 adb forward → TCP Server 等待 → 被动收 HELLO 回 ACK → AudioEngine 播放。
+/// 职责：后台循环检测 USB 设备 → 自动 adb forward → TCP 连接手机 → 被动收 HELLO 回 ACK → AudioEngine 播放。
 /// 与蓝牙链路对称：Windows 常驻等待，手机主动发起连接和握手。
 ///
 /// 握手方向：Android 发 HELLO(token+route) → Windows 校验 → 回 HELLO_ACK(route)（与 LAN/蓝牙一致）
@@ -27,8 +26,6 @@ public sealed class UsbLink : ILink
 
     // ── 链路常量 ──
     public const byte LinkTypeId = 0x04;
-    private const string UsbToken = "LABRIDGE";  // 必须 ≤ 8 字符（payload 限制）
-    private const int HelloTimeoutMs = 60_000;   // 等待手机 HELLO 超时
     private const int DetectIntervalMs = 5_000;  // USB 设备检测轮询间隔
 
     // ── 核心模块 ──
@@ -121,14 +118,14 @@ public sealed class UsbLink : ILink
                     continue;
                 }
 
-                // 3. 启动 TCP Server 等待手机连接
+                // 3. TCP 连接手机（通过 adb forward 隧道）
                 OnStatusChanged?.Invoke("USB：隧道就绪，等待手机连接...");
                 _transport = new UsbTransport();
-                await _transport.ConnectAsync(ct);  // UsbTransport 在 Windows 端作为 TCP Server
+                await _transport.ConnectAsync(ct);
 
                 // 4. 被动握手：等待手机 HELLO → 校验 → 回 ACK
                 OnStatusChanged?.Invoke("USB：手机已连接，等待握手...");
-                var route = await WaitForHelloAsync(ct);
+                var route = await UsbPassiveHandshake.WaitForHelloAsync(_transport, ct);
                 if (route < 0)
                 {
                     OnStatusChanged?.Invoke("USB：握手失败，重新等待...");
@@ -143,6 +140,7 @@ public sealed class UsbLink : ILink
 
                 // 6. 监听 ROUTE 热切包
                 _transport.PacketReceived += OnRoutePacket;
+
 
                 // 7. 等待连接断开
                 await WaitForDisconnectAsync(ct);
@@ -178,75 +176,10 @@ public sealed class UsbLink : ILink
         return false;
     }
 
-    // ── 被动握手：等待 Android HELLO → 校验 → 回 ACK（与蓝牙 BtPassiveHandshake 对称） ──
-
-    private async Task<int> WaitForHelloAsync(CancellationToken ct)
-    {
-        if (_transport == null) return -1;
-
-        var protocol = PlatformFactory.CreateProtocol();
-        var tcs = new TaskCompletionSource<int>();
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(HelloTimeoutMs);
-        using var reg = timeoutCts.Token.Register(() => tcs.TrySetResult(-1));
-
-        Action<ReadOnlyMemory<byte>> handler = data =>
-        {
-            var decoded = protocol.Decode(data.Span);
-            if (!decoded.HasValue || decoded.Value.Type != PacketType.Hello) return;
-
-            var payload = decoded.Value.Payload;
-            var token = payload.Length >= 9
-                ? Encoding.ASCII.GetString(payload[1..9]).TrimEnd('\0')
-                : "";
-
-            if (token != UsbToken)
-            {
-                Log.W(Tag, $"Token mismatch: '{token}'");
-                var nack = new Packet { Type = PacketType.HelloNack, LinkType = LinkTypeId, Sequence = 0, Payload = Array.Empty<byte>() };
-                _ = _transport.SendAsync(protocol.Encode(nack));
-                tcs.TrySetResult(-1);
-                return;
-            }
-
-            int route = payload.Length >= 1 ? Math.Clamp(payload[0], (byte)0, (byte)3) : 0;
-            var ack = new Packet { Type = PacketType.HelloAck, LinkType = LinkTypeId, Sequence = 0, Payload = new[] { (byte)route } };
-            _ = _transport.SendAsync(protocol.Encode(ack));
-            Log.I(Tag, $"HELLO verified, ACK sent (route={route})");
-            tcs.TrySetResult(route);
-        };
-
-        _transport.PacketReceived += handler;
-        try { return await tcs.Task; }
-        finally { _transport.PacketReceived -= handler; }
-    }
-
     // ── ROUTE 热切（命名方法，确保可取消订阅） ──
 
     private void OnRoutePacket(ReadOnlyMemory<byte> data)
-    {
-        var protocol = PlatformFactory.CreateProtocol();
-        var decoded = protocol.Decode(data.Span);
-        if (!decoded.HasValue || decoded.Value.Type != PacketType.Route) return;
-
-        int route = decoded.Value.Payload.Length >= 1 ? Math.Clamp((int)decoded.Value.Payload[0], 0, 3) : 0;
-        var mode = RouteToMode(route);
-
-        _engine?.Router.SetMode(mode);
-        Log.I(Tag, $"Route hot-switch: route={route}, mode={mode}");
-        OnStatusChanged?.Invoke($"USB：路线{route + 1}");
-    }
-
-    /// <summary>路线编号 → AudioRouter 模式（与其他链路映射一致）</summary>
-    private static AudioRouter.RouteMode RouteToMode(int route) => route switch
-    {
-        0 => AudioRouter.RouteMode.SpeakerOnly,
-        1 => AudioRouter.RouteMode.SpeakerOnly,
-        2 => AudioRouter.RouteMode.MicOnly,
-        3 => AudioRouter.RouteMode.MicOnlySys,
-        _ => AudioRouter.RouteMode.SpeakerOnly,
-    };
+        => UsbPassiveHandshake.HandleRoutePacket(data, _engine, OnStatusChanged);
 
     // ── AudioEngine 管理（USB 专属引擎，不复用 LAN 引擎） ──
 
@@ -255,7 +188,7 @@ public sealed class UsbLink : ILink
         var speaker = PlatformFactory.CreateRenderer(useCable: false);
         var cable = PlatformFactory.CreateRenderer(useCable: true);
         _engine = new AudioEngine(_transport, speaker, cable);
-        _engine.Router.SetMode(RouteToMode(route));
+        _engine.Router.SetMode(UsbPassiveHandshake.RouteToMode(route));
 
         _engine.OnFirstFrameDecoded += () => _stateManager.Update(ConnectionState.Streaming);
         _engine.Start();
