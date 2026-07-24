@@ -32,6 +32,9 @@ public static class PlatformFactory
             // Bluetooth 链路由 BluetoothLink 直接创建 BluetoothTransport（不走 host/port 模式）
             TransportType.Bluetooth => throw new System.InvalidOperationException(
                 "BluetoothTransport must be created by BluetoothLink (requires RfcommDeviceService)"),
+            // USB 链路由 UsbLink 直接创建 UsbTransport（不走 host/port 模式）
+            TransportType.Usb => throw new System.InvalidOperationException(
+                "UsbTransport must be created by UsbLink (requires adb forward)"),
             _ => throw new System.ArgumentOutOfRangeException(nameof(type), $"Unsupported transport: {type}")
         };
     }

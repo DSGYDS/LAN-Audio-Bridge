@@ -47,6 +47,10 @@ object PlatformFactory {
             TransportType.Bluetooth -> throw IllegalStateException(
                 "BluetoothTransport must be created by BluetoothLink (requires accepted BluetoothSocket)"
             )
+            // USB 链路由 UsbLink 直接创建 UsbTransport（需要 TCP Server 监听）
+            TransportType.Usb -> throw IllegalStateException(
+                "UsbTransport must be created by UsbLink (requires TCP server listening)"
+            )
         }
     }
 

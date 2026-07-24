@@ -70,6 +70,8 @@ fun TestUI() {
         linkManager.wifiDirect.onStreamingChanged = { s -> streaming = s }
         linkManager.bluetooth.onStatusChanged = { msg -> status = msg }
         linkManager.bluetooth.onStreamingChanged = { s -> streaming = s }
+        linkManager.usb.onStatusChanged = { msg -> status = msg }
+        linkManager.usb.onStreamingChanged = { s -> streaming = s }
         linkManager.wifiLan.start()
         onDispose { linkManager.wifiLan.stop() }
     }
@@ -195,6 +197,24 @@ fun TestUI() {
             }, modifier = Modifier.height(36.dp))
             { Text("蓝牙直连") }
         }
+
+        // ── USB 直连按钮 ──
+        Spacer(Modifier.height(4.dp))
+        Button(onClick = {
+            if (streaming) { linkManager.disconnect() }
+            else {
+                val capMode = LinkManager.routeToCapture(route)
+                if ((capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) && !projReady)
+                { status = "请先授权系统音频" }
+                else scope.launch {
+                    val needProj = capMode != AudioPipeline.MODE_MIC
+                    linkManager.connect(LinkType.USB, LinkParams(
+                        route = route, proj = if (needProj) proj else null
+                    ))
+                }
+            }
+        }, modifier = Modifier.fillMaxWidth().height(40.dp))
+        { Text("USB 直连（先连 USB 线 + 开 USB 调试）") }
 
         // ── P2P 连接进度 ──
         if (p2pStatus != "空闲") {

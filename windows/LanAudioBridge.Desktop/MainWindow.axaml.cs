@@ -89,6 +89,14 @@ public partial class MainWindow : Window
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                 BtButton.Content = active ? "停止蓝牙" : "启动蓝牙");
 
+        // ── 订阅 USB 链路事件 → 更新 UI ──
+        var usb = _linkManager.Usb;
+        usb.OnStatusChanged += msg =>
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => UsbStatusText.Text = msg);
+        usb.OnActiveChanged += active =>
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                UsbButton.Content = active ? "停止 USB" : "USB 直连");
+
         // ── 启动 LAN 常驻服务 ──
         _ = _linkManager.StartLanAsync();
 
@@ -97,6 +105,9 @@ public partial class MainWindow : Window
 
         // ── 蓝牙常驻监听（与 LAN 并行，等待手机连接） ──
         _ = _linkManager.StartBluetoothAsync();
+
+        // ── USB 常驻监听（与 LAN 并行，等待手机连接） ──
+        _ = _linkManager.StartUsbAsync();
     }
 
     // ── P2P 按钮（P2P 已常驻，按钮仅用于重新生成 QR 码） ──
@@ -114,6 +125,15 @@ public partial class MainWindow : Window
             await _linkManager.StopBluetoothAsync();
         else
             await _linkManager.StartBluetoothAsync();
+    }
+
+    // ── USB 按钮（启动/停止） ──
+    private async void OnUsbClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (_linkManager.IsUsbActive)
+            await _linkManager.StopUsbAsync();
+        else
+            await _linkManager.StartUsbAsync();
     }
 
     /// <summary>从托盘恢复窗口</summary>

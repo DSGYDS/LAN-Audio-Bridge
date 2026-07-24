@@ -15,12 +15,14 @@ public sealed class LinkManager : IDisposable
     private readonly WifiLanLink _wifiLan;
     private readonly WifiDirectLink _wifiDirect;
     private readonly BluetoothLink _bluetooth;
+    private readonly UsbLink _usb;
     private readonly ConnectionStateManager _stateManager = new();
 
     // ── 公开属性 ──
     public WifiLanLink WifiLan => _wifiLan;
     public WifiDirectLink WifiDirect => _wifiDirect;
     public BluetoothLink Bluetooth => _bluetooth;
+    public UsbLink Usb => _usb;
     public ConnectionStateManager StateManager => _stateManager;
 
     public float Volume
@@ -34,10 +36,15 @@ public sealed class LinkManager : IDisposable
         _wifiLan = new WifiLanLink(_stateManager);
         _wifiDirect = new WifiDirectLink(_stateManager, HandleRoute);
         _bluetooth = new BluetoothLink(_stateManager);
+        _usb = new UsbLink(_stateManager);
 
         // 蓝牙会话开始时暂停 LAN 引擎（避免看门狗冲突），结束时恢复
         _bluetooth.OnSessionStarted += () => _wifiLan.Engine.Stop();
         _bluetooth.OnSessionEnded += () => _wifiLan.Engine.Start();
+
+        // USB 会话同理
+        _usb.OnSessionStarted += () => _wifiLan.Engine.Stop();
+        _usb.OnSessionEnded += () => _wifiLan.Engine.Start();
     }
 
     /// <summary>共享路由控制 — 任何链路握手成功后都通过这里设置 AudioRouter 模式</summary>
@@ -60,13 +67,21 @@ public sealed class LinkManager : IDisposable
     /// <summary>停止蓝牙链路</summary>
     public Task StopBluetoothAsync() => _bluetooth.StopAsync();
 
+    /// <summary>启动 USB 链路（用户点击触发）</summary>
+    public Task StartUsbAsync() => _usb.StartAsync();
+
+    /// <summary>停止 USB 链路</summary>
+    public Task StopUsbAsync() => _usb.StopAsync();
+
     public bool IsP2pActive => _wifiDirect.IsActive;
     public bool IsBluetoothActive => _bluetooth.IsActive;
+    public bool IsUsbActive => _usb.IsActive;
 
     public void Dispose()
     {
         _wifiLan.Dispose();
         _wifiDirect.Dispose();
         _bluetooth.Dispose();
+        _usb.Dispose();
     }
 }

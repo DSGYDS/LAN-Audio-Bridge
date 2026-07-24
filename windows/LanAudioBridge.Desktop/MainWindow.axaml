@@ -9,8 +9,9 @@
     <TextBlock Grid.Row="0" Text="LAN Audio Bridge 电脑接收端" FontSize="22" FontWeight="Bold"
                Foreground="{DynamicResource SystemAccentColor}" Margin="0,0,0,8" />
 
-    <!-- Main content -->
-    <StackPanel Grid.Row="1" Spacing="10" VerticalAlignment="Top">
+    <!-- Main content（可滚动） -->
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+    <StackPanel Spacing="10" VerticalAlignment="Top">
       <!-- Status -->
       <Border Background="{DynamicResource SystemControlPageBackgroundChromeLowBrush}" CornerRadius="6" Padding="10">
         <StackPanel>
@@ -51,6 +52,17 @@
         </StackPanel>
       </Border>
 
+      <!-- USB -->
+      <Border BorderBrush="{DynamicResource SystemAccentColor}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,6,0,0">
+        <StackPanel Spacing="6">
+          <Grid ColumnDefinitions="Auto,*">
+            <TextBlock Grid.Column="0" Text="USB 直连" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" />
+            <Button Name="UsbButton" Grid.Column="1" Content="USB 直连" HorizontalAlignment="Right" Click="OnUsbClick" />
+          </Grid>
+          <TextBlock Name="UsbStatusText" Text="请连接 USB 线 + 开启 USB 调试，手机端先点“USB直连”，再点此按钮" FontSize="12" Foreground="Gray" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
       <!-- Volume -->
       <Grid ColumnDefinitions="Auto,*,Auto">
         <Label Grid.Column="0" Content="电脑播放音量：" FontWeight="SemiBold" VerticalAlignment="Center" />
@@ -81,6 +93,7 @@
         </StackPanel>
       </Border>
     </StackPanel>
+    </ScrollViewer>
 
     <!-- 底部 -->
     <TextBlock Grid.Row="2" Name="FooterText" Text="正在监听：音频 12345，握手/热切 12347"
