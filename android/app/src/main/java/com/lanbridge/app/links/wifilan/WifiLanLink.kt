@@ -22,6 +22,11 @@ import kotlinx.coroutines.withContext
  *
  * 职责：mDNS 发现 + 握手 + 推流 + 断线重连。
  * 与 WiFi Direct / 蓝牙 / USB 完全解耦。
+ *
+ * 数据通路：AudioPipeline → EncodeSender → UdpTransport.sendBlocking() → Windows UDP 12345
+ * 握手方向：Android 发 HELLO(route) → Windows 回 HELLO_ACK（与蓝牙一致）
+ * 发现机制：NsdManager 扫描 _lan-audio._udp 服务
+ * 重连机制：ReconnectionManager 监听网络状态，断线后自动重试
  */
 class WifiLanLink(
     private val context: Context,
@@ -71,8 +76,9 @@ class WifiLanLink(
         )
     }
 
-    // ── 生命周期（mDNS 发现 + 重连监听） ──
+    // ── 生命周期（mDNS 发现 + 重连监听，App 启动时调用） ──
 
+    /** 启动 mDNS 扫描 + 断线重连监听（常驻，与推流状态无关） */
     fun start() {
         reconnectionManager.start()
         discovery.setOnDeviceFound { device ->
@@ -87,6 +93,7 @@ class WifiLanLink(
         discovery.startScan()
     }
 
+    /** 停止 mDNS 扫描 + 重连监听 */
     fun stop() {
         reconnectionManager.stop()
         discovery.stopScan()
@@ -94,6 +101,10 @@ class WifiLanLink(
 
     // ── ILink 实现 ──
 
+    /**
+     * 连接 LAN 链路（用户选择发现的电脑后触发）
+     * 流程：发 HELLO 握手 → 启动推流 → 记录目标 IP（供重连用）
+     */
     override suspend fun connect(params: LinkParams): Boolean {
         val host = params.host ?: return false
         currentRoute = params.route
@@ -133,6 +144,7 @@ class WifiLanLink(
         return ok
     }
 
+    /** 推流中热切路线：切换采集模式 + 通过 UDP 发送 ROUTE 包到 Windows */
     override suspend fun sendRouteUpdate(route: Int, proj: MediaProjection?): Boolean {
         if (!isStreaming) { currentRoute = route; return true }
         currentRoute = route
@@ -146,6 +158,7 @@ class WifiLanLink(
         return true
     }
 
+    /** 断开 LAN 链路：停止推流 + 清除重连记录 + 状态回退 */
     override fun disconnect() {
         context.stopService(Intent(context, StreamingService::class.java))
         pipe.stopStreaming()
@@ -157,7 +170,7 @@ class WifiLanLink(
         onStreamingChanged?.invoke(false)
     }
 
-    // ── 工具 ──
+    // ── 工具：路线编号 → 采集模式（与 LinkManager.routeToCapture 一致） ──
 
     fun routeToCapture(r: Int) = when (r) {
         0, 3 -> AudioPipeline.MODE_SYSTEM

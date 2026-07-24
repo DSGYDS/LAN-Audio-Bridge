@@ -12,6 +12,10 @@ namespace LanAudioBridge.Desktop.Links;
 ///
 /// 职责：mDNS 发布 + HandshakeServer + AudioEngine + 路由切换。
 /// 与 WiFi Direct / 蓝牙 / USB 完全解耦。
+///
+/// 数据通路：UDP 12345 接收音频包 → AudioEngine（Opus 解码 → JitterBuffer → 播放）
+/// 握手方向：Android 发 HELLO(route) → Windows 回 HELLO_ACK → 设置 AudioRouter 模式
+/// 发现机制：mDNS 发布 _lan-audio._udp 服务，Android 端扫描发现
 /// </summary>
 public sealed class WifiLanLink : ILink
 {
@@ -46,6 +50,7 @@ public sealed class WifiLanLink : ILink
         set => _engine.Volume = value;
     }
 
+    /// <summary>构造函数：创建 UDP Transport(音频 12345 + 握手 12347) + AudioEngine + HandshakeServer + mDNS 发布器</summary>
     public WifiLanLink(ConnectionStateManager stateManager)
     {
         _stateManager = stateManager;
@@ -62,6 +67,10 @@ public sealed class WifiLanLink : ILink
 
     // ── ILink 实现 ──
 
+    /// <summary>
+    /// 启动 LAN 常驻服务（开机即启动，始终等待手机连接）
+    /// 流程：订阅状态事件 → 启动 mDNS 发布 → 启动 HandshakeServer → 启动 AudioEngine
+    /// </summary>
     public Task StartAsync()
     {
         if (_started) return Task.CompletedTask;
@@ -96,6 +105,7 @@ public sealed class WifiLanLink : ILink
         return Task.CompletedTask;
     }
 
+    /// <summary>停止 LAN 链路（仅停止 AudioEngine，mDNS 和 HandshakeServer 保持运行）</summary>
     public Task StopAsync()
     {
         _engine.Stop();
@@ -105,7 +115,12 @@ public sealed class WifiLanLink : ILink
     /// <summary>处理路由切换（供 WifiDirectLink P2P 握手成功后调用）</summary>
     public bool HandleRoute(int route) => OnHandshakeRoute(route);
 
-    // ── 握手路由回调 ──
+    // ── 握手路由回调（收到 HELLO 或 ROUTE 包时触发，设置 AudioRouter 模式） ──
+
+    /// <summary>
+    /// 处理握手路由：重置会话 + 设置 AudioRouter 模式 + 更新状态机。
+    /// 路线映射：0/1=扬声器，2=麦克风→CABLE，3=系统音频→CABLE
+    /// </summary>
 
     private bool OnHandshakeRoute(int route)
     {
@@ -137,6 +152,7 @@ public sealed class WifiLanLink : ILink
         return true;
     }
 
+    /// <summary>路线编号 → 中文描述（UI 显示用）</summary>
     public static string ModeLabel(int route) => route switch
     {
         0 => "手机系统音频 → 电脑扬声器",

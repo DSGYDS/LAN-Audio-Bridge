@@ -8,6 +8,7 @@ import com.lanbridge.app.ConnectionStateManager
 import com.lanbridge.app.StreamingService
 import com.lanbridge.app.audio.AudioPipeline
 import com.lanbridge.app.links.ILink
+import com.lanbridge.app.links.LinkManager
 import com.lanbridge.app.links.LinkParams
 import com.lanbridge.app.net.HandshakeManager
 import com.lanbridge.app.net.LinkType
@@ -60,6 +61,11 @@ class WifiDirectLink(
 
     // ── ILink 实现 ──
 
+    /**
+     * 连接 P2P 链路（用户扫码触发）
+     * 流程：获取 token → createGroup → 等待 Windows 连接 → 握手 → 推流
+     * 重连策略：已知 Windows IP 时主动发 HELLO，否则被动等待
+     */
     override suspend fun connect(params: LinkParams): Boolean = connectMutex.withLock {
         // token 来源：扫码传入 或 已配对存储（冷启动免扫码）
         val token = params.token
@@ -105,7 +111,7 @@ class WifiDirectLink(
 
         val winP2pIp = lastRemoteIp ?: goIp
         p2pTargetIp = winP2pIp
-        val capMode = routeToCapture(params.route)
+        val capMode = LinkManager.routeToCapture(params.route)
 
         val ok = withContext(Dispatchers.IO) {
             pipe.currentLinkType = LinkType.WIFI_DIRECT
@@ -125,11 +131,12 @@ class WifiDirectLink(
         ok
     }
 
+    /** 推流中热切路线：切换采集模式 + 通过 UDP 发送 ROUTE 包到 Windows */
     override suspend fun sendRouteUpdate(route: Int, proj: MediaProjection?): Boolean {
         if (!isStreaming) { currentRoute = route; return true }
         currentRoute = route
 
-        val capMode = routeToCapture(route)
+        val capMode = LinkManager.routeToCapture(route)
         val ok = withContext(Dispatchers.IO) { pipe.switchMode(capMode, proj, context) }
         if (!ok) { onStatusChanged?.invoke("需先授权系统音频"); return false }
 
@@ -138,6 +145,7 @@ class WifiDirectLink(
         return true
     }
 
+    /** 断开 P2P 链路：停止推流 + 销毁 P2P Group + 状态回退 */
     override fun disconnect() {
         context.stopService(Intent(context, StreamingService::class.java))
         pipe.stopStreaming()
@@ -150,11 +158,4 @@ class WifiDirectLink(
         onStreamingChanged?.invoke(false)
     }
 
-    // ── 工具 ──
-
-    private fun routeToCapture(r: Int) = when (r) {
-        0, 3 -> AudioPipeline.MODE_SYSTEM
-        1 -> AudioPipeline.MODE_MIX
-        else -> AudioPipeline.MODE_MIC
-    }
 }

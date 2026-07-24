@@ -24,7 +24,8 @@ object P2pHandshakeServer {
     private val protocol = PlatformFactory.createProtocol()
 
     /**
-     * 等待 Windows 发来的 HELLO
+     * 等待 Windows 发来的 HELLO（被动握手，Android 做 GO 监听 12347 端口）
+     * 流程：创建 UDP Transport 监听 → 等待收包 → 解码校验 HELLO + token → 回 HELLO_ACK 到来源端口
      *
      * @param expectedToken 期望的 token（从 QR 码 / 配对存储）
      * @param route 当前路线（0-3），通过 HELLO_ACK 告知 Windows

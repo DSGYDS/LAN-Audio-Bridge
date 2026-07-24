@@ -1,5 +1,4 @@
 using System;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using LanAudioBridge.Core;
@@ -24,8 +23,6 @@ public sealed class BluetoothLink : ILink
 
     // ── 链路常量 ──
     public const byte LinkTypeId = 0x03;
-    private const string BtToken = "LABRIDGE";  // 必须 ≤ 8 字符（payload 限制）
-    private const int HelloTimeoutMs = 60_000;  // 等待 HELLO 超时
 
     // ── 核心模块 ──
     private BluetoothTransport? _transport;
@@ -52,6 +49,7 @@ public sealed class BluetoothLink : ILink
 
     // ── ILink 实现 ──
 
+    /// <summary>启动蓝牙链路（常驻监听，与 LAN 一起开机启动）</summary>
     public Task StartAsync()
     {
         if (_started) return Task.CompletedTask;
@@ -69,6 +67,7 @@ public sealed class BluetoothLink : ILink
         return Task.CompletedTask;
     }
 
+    /// <summary>停止蓝牙链路（关闭监听 + 断开当前连接）</summary>
     public async Task StopAsync()
     {
         if (!_started) return;
@@ -93,7 +92,8 @@ public sealed class BluetoothLink : ILink
         OnActiveChanged?.Invoke(false);
     }
 
-    // ── 常驻监听循环 ──
+    // ── 常驻监听循环（核心状态机） ──
+    // 流程：等待连接 → 被动握手 → 创建引擎播放 → 等待断开 → 清理 → 循环
 
     private async Task ListenLoopAsync(CancellationToken ct)
     {
@@ -111,7 +111,7 @@ public sealed class BluetoothLink : ILink
 
                 // 连接建立 → 等待 HELLO
                 OnStatusChanged?.Invoke("蓝牙：手机已连接，等待握手...");
-                var route = await WaitForHelloAsync(ct);
+                var route = await BtPassiveHandshake.WaitForHelloAsync(_transport, ct);
                 if (route < 0)
                 {
                     OnStatusChanged?.Invoke("蓝牙：握手失败，重新等待...");
@@ -147,99 +147,29 @@ public sealed class BluetoothLink : ILink
         }
     }
 
-    // ── 被动握手：等待 Android HELLO → 校验 → 回 ACK ──
-
-    private async Task<int> WaitForHelloAsync(CancellationToken ct)
-    {
-        if (_transport == null) return -1;
-
-        var protocol = PlatformFactory.CreateProtocol();
-        var tcs = new TaskCompletionSource<int>();
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(HelloTimeoutMs);
-        using var reg = timeoutCts.Token.Register(() => tcs.TrySetResult(-1));
-
-        Action<ReadOnlyMemory<byte>> handler = data =>
-        {
-            var decoded = protocol.Decode(data.Span);
-            if (!decoded.HasValue || decoded.Value.Type != PacketType.Hello) return;
-
-            // 校验 token
-            var payload = decoded.Value.Payload;
-            var token = payload.Length >= 9
-                ? Encoding.ASCII.GetString(payload[1..9]).TrimEnd('\0')
-                : "";
-
-            if (token != BtToken)
-            {
-                Log.W(Tag, $"Token mismatch: '{token}'");
-                // 回 NACK
-                var nack = new Packet { Type = PacketType.HelloNack, LinkType = LinkTypeId, Sequence = 0, Payload = Array.Empty<byte>() };
-                _ = _transport.SendAsync(protocol.Encode(nack));
-                tcs.TrySetResult(-1);
-                return;
-            }
-
-            // 校验通过 → 回 ACK(route)
-            int route = payload.Length >= 1 ? Math.Clamp(payload[0], (byte)0, (byte)3) : 0;
-            var ack = new Packet { Type = PacketType.HelloAck, LinkType = LinkTypeId, Sequence = 0, Payload = new[] { (byte)route } };
-            _ = _transport.SendAsync(protocol.Encode(ack));
-            Log.I(Tag, $"HELLO verified, ACK sent (route={route})");
-            tcs.TrySetResult(route);
-        };
-
-        _transport.PacketReceived += handler;
-        try { return await tcs.Task; }
-        finally { _transport.PacketReceived -= handler; }
-    }
-
-    // ── ROUTE 热切处理 ──
+    // ── ROUTE 热切（命名方法，确保可取消订阅） ──
+    // 推流中手机切换路线时，发送 ROUTE 包，此处解码并切换 AudioRouter 模式
 
     private void OnRoutePacket(ReadOnlyMemory<byte> data)
-    {
-        var protocol = PlatformFactory.CreateProtocol();
-        var decoded = protocol.Decode(data.Span);
-        if (!decoded.HasValue || decoded.Value.Type != PacketType.Route) return;
+        => BtPassiveHandshake.HandleRoutePacket(data, _engine, OnStatusChanged);
 
-        int route = decoded.Value.Payload.Length >= 1 ? Math.Clamp((int)decoded.Value.Payload[0], 0, 3) : 0;
-        var mode = route switch
-        {
-            0 => AudioRouter.RouteMode.SpeakerOnly,
-            1 => AudioRouter.RouteMode.SpeakerOnly,
-            2 => AudioRouter.RouteMode.MicOnly,
-            3 => AudioRouter.RouteMode.MicOnlySys,
-            _ => AudioRouter.RouteMode.SpeakerOnly,
-        };
+    // ── AudioEngine 管理（蓝牙专属引擎，不复用 LAN 引擎） ──
 
-        _engine?.Router.SetMode(mode);
-        Log.I(Tag, $"Route hot-switch: route={route}, mode={mode}");
-        OnStatusChanged?.Invoke($"蓝牙：路线{route + 1}");
-    }
-
-    // ── AudioEngine 管理 ──
+    /// <summary>创建蓝牙专属 AudioEngine，设置路由模式并启动播放</summary>
 
     private void StartAudioEngine(int route)
     {
         var speaker = PlatformFactory.CreateRenderer(useCable: false);
         var cable = PlatformFactory.CreateRenderer(useCable: true);
         _engine = new AudioEngine(_transport, speaker, cable);
-
-        var mode = route switch
-        {
-            0 => AudioRouter.RouteMode.SpeakerOnly,
-            1 => AudioRouter.RouteMode.SpeakerOnly,
-            2 => AudioRouter.RouteMode.MicOnly,
-            3 => AudioRouter.RouteMode.MicOnlySys,
-            _ => AudioRouter.RouteMode.SpeakerOnly,
-        };
-        _engine.Router.SetMode(mode);
+        _engine.Router.SetMode(BtPassiveHandshake.RouteToMode(route));
 
         _engine.OnFirstFrameDecoded += () => _stateManager.Update(ConnectionState.Streaming);
         _engine.Start();
         _stateManager.Update(ConnectionState.Connected);
     }
 
+    /// <summary>停止并释放 AudioEngine</summary>
     private void CleanupAudioEngine()
     {
         _engine?.Stop();
@@ -247,6 +177,7 @@ public sealed class BluetoothLink : ILink
         _engine = null;
     }
 
+    /// <summary>轮询等待 RFCOMM 连接断开（ReadLoop 退出后 IsConnected 变 false）</summary>
     private async Task WaitForDisconnectAsync(CancellationToken ct)
     {
         // 等待 transport 连接断开（IsConnected 变 false）
@@ -254,6 +185,7 @@ public sealed class BluetoothLink : ILink
             await Task.Delay(500, ct);
     }
 
+    /// <summary>清理当前会话（引擎 + 传输层）</summary>
     private async Task CleanupSessionAsync()
     {
         CleanupAudioEngine();

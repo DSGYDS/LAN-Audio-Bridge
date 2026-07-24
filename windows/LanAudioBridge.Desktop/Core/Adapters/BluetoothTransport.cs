@@ -26,7 +26,6 @@ public sealed class BluetoothTransport : ITransport, IDisposable
 
     /// <summary>自定义服务 UUID（与 Android 端一致）</summary>
     public static readonly Guid ServiceUuid = Guid.Parse("A1B2C3D4-E5F6-7890-ABCD-EF1234567890");
-    private const string ServiceName = "LAN-Audio-Bridge";
 
     private BluetoothListener? _listener;
     private BluetoothClient? _client;
@@ -43,7 +42,8 @@ public sealed class BluetoothTransport : ITransport, IDisposable
 
     /// <summary>
     /// 启动 RFCOMM 监听（常驻，不阻塞）。
-    /// 在 BluetoothLink.StartAsync() 中调用。
+    /// 使用 32feet.NET BluetoothListener 注册 SDP 服务记录，
+    /// Android 端可通过 UUID 发现并连接此服务。
     /// </summary>
     public void StartListening()
     {
@@ -58,7 +58,8 @@ public sealed class BluetoothTransport : ITransport, IDisposable
 
     /// <summary>
     /// 等待 Android 连接（阻塞直到有连接或取消）。
-    /// 连接建立后自动启动帧分割读取循环。
+    /// 连接建立后自动启动帧分割读取循环（ReadLoopAsync）。
+    /// 每次新连接都会重置流状态，支持断开后重新等待。
     /// </summary>
     public async Task<bool> WaitForConnectionAsync(CancellationToken ct)
     {
@@ -90,9 +91,10 @@ public sealed class BluetoothTransport : ITransport, IDisposable
         }
     }
 
-    /// <summary>ITransport.ConnectAsync — 蓝牙 Server 模式不使用此方法。</summary>
+    /// <summary>ITransport.ConnectAsync — 蓝牙 Server 模式不使用此方法（由 WaitForConnectionAsync 替代）。</summary>
     public Task ConnectAsync(CancellationToken ct = default) => Task.CompletedTask;
 
+    /// <summary>断开当前客户端连接（不停止监听，可继续等待下一个连接）</summary>
     public async Task DisconnectAsync()
     {
         _connected = false;
@@ -112,7 +114,7 @@ public sealed class BluetoothTransport : ITransport, IDisposable
         Log.I(Tag, "Client disconnected");
     }
 
-    /// <summary>停止监听（关闭整个 Server）</summary>
+    /// <summary>停止监听（关闭整个 Server，释放所有资源）</summary>
     public void StopListening()
     {
         _connected = false;
@@ -128,6 +130,7 @@ public sealed class BluetoothTransport : ITransport, IDisposable
         Log.I(Tag, "RFCOMM server stopped");
     }
 
+    /// <summary>发送数据包到已连接的 Android 客户端</summary>
     public async Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
         if (!_connected || _stream == null) return;
@@ -145,6 +148,10 @@ public sealed class BluetoothTransport : ITransport, IDisposable
     }
 
     // ── 流式帧分割读取循环 ──
+    // RFCOMM 是字节流（无消息边界），利用 PacketHeader 的 PayloadLength 字段做帧分割：
+    // 1. 读 15B header → 校验 Magic+Version → 解析 PayloadLength
+    // 2. 再读 PayloadLength 字节 payload
+    // 3. 组装完整包 → 触发 PacketReceived 事件
 
     private async Task ReadLoopAsync(CancellationToken ct)
     {
@@ -207,6 +214,7 @@ public sealed class BluetoothTransport : ITransport, IDisposable
         Log.I(Tag, "ReadLoop exited");
     }
 
+    /// <summary>精确读取 count 字节（流可能分片到达，循环读满）</summary>
     private async Task<bool> ReadExactAsync(byte[] buffer, int count, CancellationToken ct)
     {
         int offset = 0;

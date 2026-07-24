@@ -48,6 +48,7 @@ public sealed class WifiDirectLink : ILink
 
     // ── ILink 实现 ──
 
+    /// <summary>启动 P2P 链路（创建 P2pHelper + 生成 QR 码 + 等待手机扫码连接）</summary>
     public async Task StartAsync()
     {
         if (_p2pHelper != null) return;
@@ -71,6 +72,7 @@ public sealed class WifiDirectLink : ILink
         await _p2pHelper.StartAsync();
     }
 
+    /// <summary>停止 P2P 链路（取消握手 + 停止发现 + 清理 QR）</summary>
     public async Task StopAsync()
     {
         if (_p2pHelper == null) return;
@@ -92,12 +94,14 @@ public sealed class WifiDirectLink : ILink
     }
 
     // ── P2P 握手（主动向 Android GO 发 HELLO） ──
+    // 流程：P2P 连接建立 → 等待 3s（Android 就绪）→ 发 HELLO(token) → 等 ACK → 设置路由
 
     private const int HelloInitialDelayMs = 3_000;   // 等 Android 端 waitForHello 就绪
     private const int HelloMaxAttempts = 6;           // 重试次数（覆盖 Android 60s 监听窗口）
     private const int HelloTimeoutMs = 3_000;         // 每次等待 ACK 超时
     private const int HelloRetryDelayMs = 2_000;      // 重试间隔
 
+    /// <summary>向 Android GO 发送 HELLO 并等待 ACK（最多重试 6 次，覆盖 Android 60s 监听窗口）</summary>
     private async Task SendHelloToAndroidGo(CancellationToken ct)
     {
         ITransport? transport = null;
@@ -188,6 +192,7 @@ public sealed class WifiDirectLink : ILink
         }
     }
 
+    /// <summary>等待收到一个数据包（带超时，用于等待 HELLO_ACK）</summary>
     private static async Task<ReadOnlyMemory<byte>?> WaitForPacketAsync(ITransport transport, int timeoutMs)
     {
         var tcs = new TaskCompletionSource<ReadOnlyMemory<byte>>();

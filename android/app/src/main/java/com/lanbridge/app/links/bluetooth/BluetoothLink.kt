@@ -16,6 +16,7 @@ import com.lanbridge.app.core.adapters.PacketHeaderAdapter
 import com.lanbridge.app.core.infrastructure.Log
 import com.lanbridge.app.core.interfaces.Packet
 import com.lanbridge.app.links.ILink
+import com.lanbridge.app.links.LinkManager
 import com.lanbridge.app.links.LinkParams
 import com.lanbridge.app.net.LinkType
 import com.lanbridge.app.net.PacketType
@@ -23,8 +24,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * BluetoothLink — 蓝牙 RFCOMM 链路（Android 端，主动发起方）
@@ -44,9 +43,6 @@ class BluetoothLink(
     companion object {
         private const val TAG = "BluetoothLink"
         const val LINK_TYPE_ID: Byte = LinkType.BLUETOOTH
-        private const val BT_TOKEN = "LABRIDGE"  // 必须 ≤ 8 字符（payload 限制）
-        private const val ACK_TIMEOUT_S = 10L
-        private const val ACK_MAX_ATTEMPTS = 3
     }
 
     // ── 子模块 ──
@@ -63,6 +59,11 @@ class BluetoothLink(
         private set
 
     // ── ILink 实现 ──
+
+    /**
+     * 连接蓝牙链路（用户点击“蓝牙直连”触发）
+     * 流程：查找已配对电脑 → RFCOMM 连接 → 发 HELLO 握手 → 启动推流
+     */
 
     @SuppressLint("MissingPermission")
     override suspend fun connect(params: LinkParams): Boolean = connectMutex.withLock {
@@ -93,7 +94,7 @@ class BluetoothLink(
 
         // 3. 主动发 HELLO → 等待 ACK
         val ackRoute = withContext(Dispatchers.IO) {
-            sendHelloAndWaitForAck(transport, params.route)
+            BtHandshakeClient.sendHelloAndWaitForAck(transport, params.route)
         }
         if (ackRoute < 0) {
             onStatusChanged?.invoke("蓝牙：握手失败（电脑未响应）")
@@ -106,7 +107,7 @@ class BluetoothLink(
         onStatusChanged?.invoke("蓝牙：握手成功 ✓ 准备推流")
 
         // 4. 启动推流（注入 BluetoothTransport）
-        val capMode = routeToCapture(params.route)
+        val capMode = LinkManager.routeToCapture(params.route)
         val ok = withContext(Dispatchers.IO) {
             pipe.currentLinkType = LINK_TYPE_ID
             pipe.startStreamingWithTransport(transport, capMode, params.proj, context)
@@ -126,11 +127,12 @@ class BluetoothLink(
         ok
     }
 
+    /** 推流中热切路线：切换采集模式 + 发送 ROUTE 包通知 Windows 切换 AudioRouter */
     override suspend fun sendRouteUpdate(route: Int, proj: MediaProjection?): Boolean {
         if (!isStreaming) { currentRoute = route; return true }
         currentRoute = route
 
-        val capMode = routeToCapture(route)
+        val capMode = LinkManager.routeToCapture(route)
         val ok = withContext(Dispatchers.IO) { pipe.switchMode(capMode, proj, context) }
         if (!ok) { onStatusChanged?.invoke("需先授权系统音频"); return false }
 
@@ -145,6 +147,7 @@ class BluetoothLink(
         return true
     }
 
+    /** 断开蓝牙链路：停止推流 + 关闭 RFCOMM + 状态回退 */
     override fun disconnect() {
         context.stopService(Intent(context, StreamingService::class.java))
         pipe.stopStreaming()
@@ -160,7 +163,7 @@ class BluetoothLink(
         onStreamingChanged?.invoke(false)
     }
 
-    // ── 发现已配对设备 ──
+    // ── 发现已配对设备（按蓝牙设备类过滤，只连电脑类设备） ──
 
     @SuppressLint("MissingPermission")
     private fun findPairedWindowsDevice(): BluetoothDevice? {
@@ -180,60 +183,4 @@ class BluetoothLink(
         return null
     }
 
-    // ── 握手：发 HELLO → 等 ACK ──
-
-    private fun sendHelloAndWaitForAck(transport: BluetoothTransport, route: Int): Int {
-        val protocol = PacketHeaderAdapter()
-
-        // 构造 HELLO payload: [0]=route, [1-8]=token ASCII
-        val tokenBytes = BT_TOKEN.toByteArray(Charsets.US_ASCII)
-        val payload = ByteArray(9)
-        payload[0] = route.toByte()
-        System.arraycopy(tokenBytes, 0, payload, 1, minOf(8, tokenBytes.size))
-
-        val packet = Packet(PacketType.HELLO, LINK_TYPE_ID, 0.toUShort(), payload)
-        val encoded = protocol.encode(packet)
-
-        for (attempt in 1..ACK_MAX_ATTEMPTS) {
-            // 注册 ACK 监听
-            val latch = CountDownLatch(1)
-            var ackRoute = -1
-
-            transport.onPacketReceived = { data ->
-                val decoded = protocol.decode(data)
-                if (decoded != null && decoded.type == PacketType.HELLO_ACK) {
-                    ackRoute = if (decoded.payload.isNotEmpty())
-                        decoded.payload[0].toInt().coerceIn(0, 3) else 0
-                    latch.countDown()
-                } else if (decoded != null && decoded.type == PacketType.HELLO_NACK) {
-                    ackRoute = -1
-                    latch.countDown()
-                }
-            }
-
-            // 发送 HELLO
-            transport.sendBlocking(encoded)
-            Log.i(TAG, "HELLO sent (attempt $attempt/$ACK_MAX_ATTEMPTS)")
-
-            // 等待 ACK
-            val completed = latch.await(ACK_TIMEOUT_S, TimeUnit.SECONDS)
-            transport.onPacketReceived = null  // 清除回调
-
-            if (completed && ackRoute >= 0) {
-                Log.i(TAG, "HELLO_ACK received, route=$ackRoute")
-                return ackRoute
-            }
-            Log.w(TAG, "ACK timeout (attempt $attempt)")
-        }
-
-        return -1
-    }
-
-    // ── 工具 ──
-
-    private fun routeToCapture(r: Int) = when (r) {
-        0, 3 -> AudioPipeline.MODE_SYSTEM
-        1 -> AudioPipeline.MODE_MIX
-        else -> AudioPipeline.MODE_MIC
-    }
 }

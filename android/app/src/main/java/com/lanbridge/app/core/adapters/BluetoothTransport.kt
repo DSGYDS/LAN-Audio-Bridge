@@ -16,6 +16,10 @@ import java.util.UUID
  *
  * 职责：主动连接 Windows RFCOMM Server，在字节流上实现 PacketHeader 帧分割。
  *
+ * 帧分割协议（与 Windows 端一致）：
+ *   发送：直接写入 [15B header + payload] 完整字节数组
+ *   接收：读 15B → 解析 PayloadLength → 再读 payload → 触发 onPacketReceived
+ *
  * 生命周期：
  *   connectTo(device) → 连接到 Windows 蓝牙服务
  *   连接建立后自动启动帧分割读取循环
@@ -46,6 +50,7 @@ class BluetoothTransport : ITransport {
 
     /**
      * 连接到 Windows RFCOMM Server。
+     * 使用 createInsecureRfcommSocketToServiceRecord（不触发系统配对弹窗，依赖已有配对）。
      * @param device 已配对的 Windows 蓝牙设备
      * @return true=连接成功
      */
@@ -78,6 +83,7 @@ class BluetoothTransport : ITransport {
     /** ITransport.connect — 蓝牙链路使用 connectTo(device)，此方法为接口兼容保留 */
     override suspend fun connect() { }
 
+    /** 断开 RFCOMM 连接，停止读取循环，释放流和 socket */
     override suspend fun disconnect() {
         if (!_isConnected) return
         _isConnected = false
@@ -95,6 +101,7 @@ class BluetoothTransport : ITransport {
 
     /**
      * 阻塞发送（供非协程的音频采集线程使用）
+     * 写入完整包字节数组到 RFCOMM 流，synchronized 保证线程安全
      */
     fun sendBlocking(data: ByteArray) {
         if (!_isConnected) return
@@ -111,7 +118,7 @@ class BluetoothTransport : ITransport {
         }
     }
 
-    // ── 流式帧分割接收循环 ──
+    // ── 流式帧分割接收循环（与 Windows 端 ReadLoopAsync 逻辑对称） ──
 
     private suspend fun receiveLoop() = withContext(Dispatchers.IO) {
         val headerBuf = ByteArray(HEADER_SIZE)
