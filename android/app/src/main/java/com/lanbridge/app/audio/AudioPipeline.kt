@@ -5,6 +5,7 @@ import android.media.projection.MediaProjection
 import com.lanbridge.app.core.adapters.MicCapturerAdapter
 import com.lanbridge.app.core.adapters.SystemAudioCapturerAdapter
 import com.lanbridge.app.core.infrastructure.Log
+import com.lanbridge.app.core.interfaces.ITransport
 import com.lanbridge.app.net.LinkType
 
 /**
@@ -51,6 +52,22 @@ class AudioPipeline(config: AudioConfig = AudioConfig.DEFAULT) {
     fun startStreaming(m: Int = MODE_MIC, proj: MediaProjection? = null, ctx: Context? = null, host: String? = null, port: Int = 12345, localBindAddress: String? = null): Boolean {
         if (isStreaming()) return true
         if (!encodeSender.prepare(host, port, localBindAddress)) return false
+        encodeSender.reset()
+        mode = m
+        val started = captureLoop.start(m, proj, ctx)
+        if (!started) {
+            encodeSender.release()
+        }
+        return started
+    }
+
+    /**
+     * 使用外部 Transport 启动推流（蓝牙链路用）。
+     * 与 startStreaming 的区别：不创建 UdpTransport，直接使用传入的 ITransport。
+     */
+    fun startStreamingWithTransport(t: ITransport, m: Int, proj: MediaProjection? = null, ctx: Context? = null): Boolean {
+        if (isStreaming()) return true
+        if (!encodeSender.prepareWithTransport(t)) return false
         encodeSender.reset()
         mode = m
         val started = captureLoop.start(m, proj, ctx)

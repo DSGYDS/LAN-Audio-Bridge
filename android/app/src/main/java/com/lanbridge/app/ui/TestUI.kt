@@ -68,6 +68,8 @@ fun TestUI() {
         linkManager.wifiLan.onStreamingChanged = { s -> streaming = s }
         linkManager.wifiDirect.onStatusChanged = { msg -> status = msg }
         linkManager.wifiDirect.onStreamingChanged = { s -> streaming = s }
+        linkManager.bluetooth.onStatusChanged = { msg -> status = msg }
+        linkManager.bluetooth.onStreamingChanged = { s -> streaming = s }
         linkManager.wifiLan.start()
         onDispose { linkManager.wifiLan.stop() }
     }
@@ -176,9 +178,22 @@ fun TestUI() {
             Spacer(Modifier.width(8.dp))
             Button(onClick = { showScanner = true }, modifier = Modifier.height(36.dp))
             { Text("扫码直连") }
-            Spacer(Modifier.weight(1f))
-            if (discoveredDevices.isNotEmpty()) Text("已发现 ${discoveredDevices.size} 台",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = {
+                if (streaming) { linkManager.disconnect() }
+                else {
+                    val capMode = LinkManager.routeToCapture(route)
+                    if ((capMode == AudioPipeline.MODE_SYSTEM || capMode == AudioPipeline.MODE_MIX) && !projReady)
+                    { status = "请先授权系统音频" }
+                    else scope.launch {
+                        val needProj = capMode != AudioPipeline.MODE_MIC
+                        linkManager.connect(LinkType.BLUETOOTH, LinkParams(
+                            route = route, proj = if (needProj) proj else null
+                        ))
+                    }
+                }
+            }, modifier = Modifier.height(36.dp))
+            { Text("蓝牙直连") }
         }
 
         // ── P2P 连接进度 ──

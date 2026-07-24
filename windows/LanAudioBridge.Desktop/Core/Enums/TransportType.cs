@@ -5,5 +5,6 @@ namespace LanAudioBridge.Core;
 /// </summary>
 public enum TransportType
 {
-    Udp
+    Udp,
+    Bluetooth
 }

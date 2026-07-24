@@ -1,42 +1,38 @@
-# === Build outputs ===
-bin/
-obj/
-build/
-app/build/
-*.apk
-*.aab
-*.appx
-*.msix
-
-# === IDE & OS ===
-.idea/
-.gradle/
-.kotlin/
-*.suo
-*.user
-.vs/
-.vscode/
-.DS_Store
-Thumbs.db
 
 # === .NET ===
+# === Archives (VB-Cable drivers, etc.) ===
+# === Build outputs ===
+# === IDE & OS ===
+# === Kotlin ===
+# === Python ===
+# === Runtime artifacts ===
+*.aab
+*.apk
+*.appx
+*.egg-info/
+*.log
+*.msix
 *.nupkg
+*.pyc
+*.suo
+*.user
+.DS_Store
+.gradle/
+.idea/
+.kotlin/
+.venv/
+.vs/
+.vscode/
+__pycache__/
+app/build/
+archive/*.7z
+archive/*.zip
+bin/
+build/
+local.properties
+obj/
 project.assets.json
 project.nuget.cache
-
-# === Kotlin ===
-local.properties
-
-# === Python ===
-__pycache__/
-*.pyc
-*.egg-info/
-.venv/
+Thumbs.db
 venv/
-
-# === Archives (VB-Cable drivers, etc.) ===
-archive/*.zip
-archive/*.7z
-
-# === Runtime artifacts ===
-*.log
+商业化方案.md

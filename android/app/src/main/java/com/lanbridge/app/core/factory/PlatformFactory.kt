@@ -43,6 +43,10 @@ object PlatformFactory {
                 remotePort = port,
                 localBindAddress = localBindAddress
             )
+            // Bluetooth 链路由 BluetoothLink 直接创建 BluetoothTransport（需要已连接的 BluetoothSocket）
+            TransportType.Bluetooth -> throw IllegalStateException(
+                "BluetoothTransport must be created by BluetoothLink (requires accepted BluetoothSocket)"
+            )
         }
     }
 

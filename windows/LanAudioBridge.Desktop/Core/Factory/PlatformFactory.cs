@@ -26,9 +26,14 @@ public static class PlatformFactory
     /// <param name="localPort">本地绑定端口（0 = 随机，仅 client 模式）</param>
     public static ITransport CreateTransport(TransportType type, string? host = null, int port = 12345, int localPort = 0)
     {
-        if (type != TransportType.Udp)
-            throw new System.ArgumentOutOfRangeException(nameof(type), $"Unsupported transport: {type}");
-        return new UdpTransport(host != null ? localPort : port, host, port);
+        return type switch
+        {
+            TransportType.Udp => new UdpTransport(host != null ? localPort : port, host, port),
+            // Bluetooth 链路由 BluetoothLink 直接创建 BluetoothTransport（不走 host/port 模式）
+            TransportType.Bluetooth => throw new System.InvalidOperationException(
+                "BluetoothTransport must be created by BluetoothLink (requires RfcommDeviceService)"),
+            _ => throw new System.ArgumentOutOfRangeException(nameof(type), $"Unsupported transport: {type}")
+        };
     }
 
     /// <summary>创建协议编解码实例</summary>

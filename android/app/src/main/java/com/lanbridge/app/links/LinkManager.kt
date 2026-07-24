@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.projection.MediaProjection
 import com.lanbridge.app.ConnectionStateManager
 import com.lanbridge.app.audio.AudioPipeline
+import com.lanbridge.app.links.bluetooth.BluetoothLink
 import com.lanbridge.app.links.wifidirect.WifiDirectLink
 import com.lanbridge.app.links.wifilan.WifiLanLink
 import com.lanbridge.app.net.LinkType
@@ -24,7 +25,7 @@ class LinkManager(
     // ── 四级链路实例 ──
     val wifiLan = WifiLanLink(context, pipe, stateManager)
     val wifiDirect = WifiDirectLink(context, pipe, stateManager)
-    // val bluetooth = BluetoothLink(context, pipe, stateManager)  // 预留
+    val bluetooth = BluetoothLink(context, pipe, stateManager)
     // val usb = UsbLink(context, pipe, stateManager)              // 预留
 
     private var activeLink: ILink? = null
@@ -43,6 +44,7 @@ class LinkManager(
         val link: ILink = when (linkType) {
             LinkType.WIFI_LAN -> wifiLan
             LinkType.WIFI_DIRECT -> wifiDirect
+            LinkType.BLUETOOTH -> bluetooth
             else -> return false
         }
 

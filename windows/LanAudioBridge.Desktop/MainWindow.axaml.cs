@@ -81,11 +81,22 @@ public partial class MainWindow : Window
             VolumeText.Text = $"{(int)(vol * 100)}%";
         };
 
+        // ── 订阅蓝牙链路事件 → 更新 UI ──
+        var bt = _linkManager.Bluetooth;
+        bt.OnStatusChanged += msg =>
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => BtStatusText.Text = msg);
+        bt.OnActiveChanged += active =>
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                BtButton.Content = active ? "停止蓝牙" : "启动蓝牙");
+
         // ── 启动 LAN 常驻服务 ──
         _ = _linkManager.StartLanAsync();
 
         // ── P2P 冷启动自动常驻（与 LAN 并行，直到软件关闭） ──
         _ = _linkManager.StartP2pAsync();
+
+        // ── 蓝牙常驻监听（与 LAN 并行，等待手机连接） ──
+        _ = _linkManager.StartBluetoothAsync();
     }
 
     // ── P2P 按钮（P2P 已常驻，按钮仅用于重新生成 QR 码） ──
@@ -94,6 +105,15 @@ public partial class MainWindow : Window
         // P2P 常驻不可停止，点击仅刷新 QR 码
         await _linkManager.StopP2pAsync();
         await _linkManager.StartP2pAsync();
+    }
+
+    // ── 蓝牙按钮（启动/停止） ──
+    private async void OnBtClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (_linkManager.IsBluetoothActive)
+            await _linkManager.StopBluetoothAsync();
+        else
+            await _linkManager.StartBluetoothAsync();
     }
 
     /// <summary>从托盘恢复窗口</summary>

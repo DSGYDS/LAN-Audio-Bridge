@@ -1,9 +1,11 @@
 package com.lanbridge.app.audio
 
+import com.lanbridge.app.core.adapters.BluetoothTransport
 import com.lanbridge.app.core.adapters.UdpTransport
 import com.lanbridge.app.core.enums.TransportType
 import com.lanbridge.app.core.factory.PlatformFactory
 import com.lanbridge.app.core.infrastructure.Log
+import com.lanbridge.app.core.interfaces.ITransport
 import com.lanbridge.app.core.interfaces.Packet
 import com.lanbridge.app.net.LinkType
 import com.lanbridge.app.net.PacketType
@@ -24,7 +26,7 @@ class EncodeSender(private val config: AudioConfig) {
     private val enc = AudioEncoder(config)
     private val protocol = PlatformFactory.createProtocol()
     private val assembler = PcmFrameAssembler(AudioPipeline.FRAME_BYTES)
-    private var transport: UdpTransport? = null
+    private var transport: ITransport? = null
     private var seq = 0
     private var firstFrameNotified = false
 
@@ -59,6 +61,16 @@ class EncodeSender(private val config: AudioConfig) {
         return true
     }
 
+    /**
+     * 使用外部 Transport 准备（蓝牙链路用）。
+     * 不创建 UdpTransport，直接使用传入的已连接 ITransport。
+     */
+    fun prepareWithTransport(externalTransport: ITransport): Boolean {
+        if (!enc.prepare()) return false
+        transport = externalTransport
+        return true
+    }
+
     /** 喂入一帧 PCM（可能不是 1920 字节，内部拼帧） */
     fun feed(pcm: ByteArray) {
         assembler.push(pcm) { frame ->
@@ -84,7 +96,10 @@ class EncodeSender(private val config: AudioConfig) {
 
     /** 释放编码器 + Transport */
     fun release() {
-        transport?.let { t -> runBlocking { t.disconnect() } }
+        transport?.let { t ->
+            // 蓝牙 Transport 由 BluetoothLink 管理生命周期，此处不主动断开
+            if (t is UdpTransport) runBlocking { t.disconnect() }
+        }
         transport = null
         enc.release()
     }
@@ -93,6 +108,10 @@ class EncodeSender(private val config: AudioConfig) {
         val t = transport ?: return
         val packet = Packet(PacketType.AUDIO, linkType, seq.toUShort(), opus)
         val encoded = protocol.encode(packet)
-        t.sendBlocking(encoded)
+        when (t) {
+            is UdpTransport -> t.sendBlocking(encoded)
+            is BluetoothTransport -> t.sendBlocking(encoded)
+            else -> runBlocking { t.send(encoded) }
+        }
     }
 }

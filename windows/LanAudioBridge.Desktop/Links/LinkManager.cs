@@ -14,11 +14,13 @@ public sealed class LinkManager : IDisposable
     // ── 四级链路实例 ──
     private readonly WifiLanLink _wifiLan;
     private readonly WifiDirectLink _wifiDirect;
+    private readonly BluetoothLink _bluetooth;
     private readonly ConnectionStateManager _stateManager = new();
 
     // ── 公开属性 ──
     public WifiLanLink WifiLan => _wifiLan;
     public WifiDirectLink WifiDirect => _wifiDirect;
+    public BluetoothLink Bluetooth => _bluetooth;
     public ConnectionStateManager StateManager => _stateManager;
 
     public float Volume
@@ -31,6 +33,11 @@ public sealed class LinkManager : IDisposable
     {
         _wifiLan = new WifiLanLink(_stateManager);
         _wifiDirect = new WifiDirectLink(_stateManager, HandleRoute);
+        _bluetooth = new BluetoothLink(_stateManager);
+
+        // 蓝牙会话开始时暂停 LAN 引擎（避免看门狗冲突），结束时恢复
+        _bluetooth.OnSessionStarted += () => _wifiLan.Engine.Stop();
+        _bluetooth.OnSessionEnded += () => _wifiLan.Engine.Start();
     }
 
     /// <summary>共享路由控制 — 任何链路握手成功后都通过这里设置 AudioRouter 模式</summary>
@@ -47,11 +54,19 @@ public sealed class LinkManager : IDisposable
     /// <summary>停止 P2P 链路</summary>
     public Task StopP2pAsync() => _wifiDirect.StopAsync();
 
+    /// <summary>启动蓝牙链路（常驻监听，与 LAN 一起启动）</summary>
+    public Task StartBluetoothAsync() => _bluetooth.StartAsync();
+
+    /// <summary>停止蓝牙链路</summary>
+    public Task StopBluetoothAsync() => _bluetooth.StopAsync();
+
     public bool IsP2pActive => _wifiDirect.IsActive;
+    public bool IsBluetoothActive => _bluetooth.IsActive;
 
     public void Dispose()
     {
         _wifiLan.Dispose();
         _wifiDirect.Dispose();
+        _bluetooth.Dispose();
     }
 }

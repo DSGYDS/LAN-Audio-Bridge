@@ -31,4 +31,5 @@ enum class PacketType(val code: Byte) {
 object LinkType {
     const val WIFI_LAN: Byte = 0x01
     const val WIFI_DIRECT: Byte = 0x02
+    const val BLUETOOTH: Byte = 0x03
 }

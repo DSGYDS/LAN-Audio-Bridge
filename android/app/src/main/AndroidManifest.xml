@@ -24,6 +24,11 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <!-- 通知（前台服务必需） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 蓝牙 RFCOMM（Android 12+ 用 BLUETOOTH_CONNECT/ADVERTISE，12- 用旧权限） -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 
     <application
         android:allowBackup="true"

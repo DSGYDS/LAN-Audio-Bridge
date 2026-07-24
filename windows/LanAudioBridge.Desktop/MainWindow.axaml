@@ -40,6 +40,17 @@
         </StackPanel>
       </Border>
 
+      <!-- Bluetooth -->
+      <Border BorderBrush="{DynamicResource SystemAccentColor}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,6,0,0">
+        <StackPanel Spacing="6">
+          <Grid ColumnDefinitions="Auto,*">
+            <TextBlock Grid.Column="0" Text="蓝牙直连" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" />
+            <Button Name="BtButton" Grid.Column="1" Content="启动蓝牙" HorizontalAlignment="Right" Click="OnBtClick" />
+          </Grid>
+          <TextBlock Name="BtStatusText" Text="请先在手机与电脑间配对蓝牙，然后双端同时点击启动" FontSize="12" Foreground="Gray" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
       <!-- Volume -->
       <Grid ColumnDefinitions="Auto,*,Auto">
         <Label Grid.Column="0" Content="电脑播放音量：" FontWeight="SemiBold" VerticalAlignment="Center" />
